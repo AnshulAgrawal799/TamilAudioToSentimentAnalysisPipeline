@@ -1,0 +1,10 @@
+torch>=1.12.0
+torchaudio>=0.12.0
+openai-whisper>=20231117
+nltk>=3.8
+pyyaml>=6.0
+python-dateutil>=2.8.2
+ffmpeg-python>=0.2.0
+google-cloud-translate>=3.11.1
+langdetect>=1.0.9
+indic-nlp-library>=0.91

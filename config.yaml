@@ -1,0 +1,64 @@
+# Audio paths
+audio_dir: "./audio"
+output_dir: "./data/outputs"
+temp_dir: "./data/tmp"
+
+# Audio processing (conversion controls)
+audio_processing:
+  convert_mp3_to_wav: true          # set false to skip conversion and feed MP3s directly to ASR
+  wav_sample_rate: 16000            # -ar 16000
+  wav_channels: 1                   # -ac 1 (mono)
+  out_dir: "./data/tmp"             # destination for converted WAVs (matches temp_dir)
+  delete_mp3_after_success: false   # set true to remove MP3s after successful conversion
+  workers: null                     # null = let code choose default (e.g. cpu_count//2)
+  overwrite_existing_wav: false     # set true to force reconversion even if WAV exists
+
+# ASR settings
+asr_model: "large-v3"  # Upgraded from "small" for better Tamil transcription
+language: "ta"
+
+# Field definitions
+fields:
+  textTamil: "Tamil text from transcription"
+  textEnglish: "English translation text"
+  speaker_roles: ["buyer", "seller", "other"]
+  intent_categories: ["purchase", "request", "complaint", "product_praise", "bargain", "greeting", "other"]
+  sentiment_labels: ["positive", "neutral", "negative"]
+  emotion_categories: ["happy", "neutral", "disappointed"]
+
+# Sentiment analysis thresholds
+sentiment_thresholds:
+  positive: 0.1
+  negative: -0.1
+  neutral_range: [-0.1, 0.1]
+
+# Placeholder values for missing metadata
+placeholders:
+  seller_id: "S123"
+  stop_id: "STOP45"
+  anchor_time: "2025-08-19T00:00:00Z"
+  sales_at_stop:
+    tomato: 36
+    onion: 15
+    potato: 10
+  inventory_after_sale:
+    tomato: 22
+    onion: 5
+    potato: 8
+
+# NLU thresholds
+confidence_threshold: 0.3
+min_segment_words: 4
+
+# Translation settings
+translation:
+  use_google_cloud: true  # Use Google Cloud Translate API for better quality
+  fallback_to_googletrans: true  # Fallback to googletrans if Google Cloud unavailable
+  batch_size: 10  # Process translations in batches
+  retry_attempts: 3  # Number of retry attempts for failed translations
+  
+# Quality thresholds
+quality_thresholds:
+  min_segment_confidence: 0.5  # Minimum confidence for segments
+  min_translation_quality: 0.7  # Minimum quality for translations
+  max_segment_length: 200  # Maximum characters per segment

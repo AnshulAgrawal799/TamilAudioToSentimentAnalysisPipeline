@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+*.pyo
+*.coverage
+.coverage.*
+*.egg-info/
+dist/
+build/
+eggs/
+pip-wheel-metadata/
+*.egg
+*.whl
+
+# Virtual envs
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# pytest
+.pytest_cache/
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Coverage reports
+htmlcov/
+.coverage
+
+# Build / packaging
+pip-wheel-metadata/
+dist/
+build/
+
+# Sensitive / config
+.env
+*.env
+secrets.json
+credentials.json
+
+# Audio / large data (DO NOT track large audio files in repo)
+# use specific extensions and directories you use -> adjust as necessary
+/audio/
+data/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Models / caches / large binaries
+models/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.h5
+*.npy
+*.npz
+*.npz
+*.bin
+
+# Other caches
+.cache/
+.cache/
+__MACOSX/
+
+# GitHub/CI
+.vagrant/
+.svn/
