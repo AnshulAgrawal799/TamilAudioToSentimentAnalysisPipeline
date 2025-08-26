@@ -22,15 +22,16 @@ fields:
   textTamil: "Tamil text from transcription"
   textEnglish: "English translation text"
   speaker_roles: ["buyer", "seller", "other"]
-  intent_categories: ["purchase", "request", "complaint", "product_praise", "bargain", "greeting", "other"]
+  intent_categories: ["purchase_positive", "purchase_negative", "purchase_request", "complaint", "product_praise", "bargain", "greeting", "other"]
   sentiment_labels: ["positive", "neutral", "negative"]
   emotion_categories: ["happy", "neutral", "disappointed"]
 
 # Sentiment analysis thresholds
 sentiment_thresholds:
-  positive: 0.1
-  negative: -0.1
-  neutral_range: [-0.1, 0.1]
+  positive: 0.15
+  negative: -0.15
+  neutral_range: [-0.15, 0.15]
+  # Clear mapping: score >= 0.15 = positive, score <= -0.15 = negative, else neutral
 
 # Placeholder values for missing metadata
 placeholders:

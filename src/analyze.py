@@ -60,6 +60,10 @@ class Segment:
         self.start_ms = kwargs.get('start_ms', 0)
         self.end_ms = kwargs.get('end_ms', 0)
         self.duration_ms = kwargs.get('duration_ms', 0)
+        # New fields for better tracking
+        self.translation_confidence = kwargs.get('translation_confidence', 0.5)
+        self.is_translated = kwargs.get('is_translated', False)
+        self.analysis_metadata = kwargs.get('analysis_metadata', {})
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -79,7 +83,10 @@ class Segment:
             'audio_file_id': self.audio_file_id,
             'start_ms': self.start_ms,
             'end_ms': self.end_ms,
-            'duration_ms': self.duration_ms
+            'duration_ms': self.duration_ms,
+            'translation_confidence': self.translation_confidence,
+            'is_translated': self.is_translated,
+            'analysis_metadata': self.analysis_metadata
         }
     
 
@@ -106,11 +113,13 @@ class NLUAnalyzer:
             'i have', 'fresh', 'price', 'rs', 'kg', 'kilo', 'i can give',
             'available', 'stock', 'quality', 'best', 'cheap', 'discount',
             'selling', 'vendor', 'supplier', 'wholesale', 'retail',
+            'come tomorrow', 'bring', 'i will bring', 'i can bring',
             # Tamil patterns for seller (Unicode)
             'உள்ளது', 'விலை', 'கிலோ', 'ரூபாய்', 'கொடுக்கலாம்', 'உள்ளன',
             'தரமான', 'சிறந்த', 'மலிவு', 'தள்ளுபடி', 'ஆஃபர்', 'வாங்குங்கள்',
             'எடுத்துக்கொள்ளுங்கள்', 'கொடுக்கிறேன்', 'விற்கிறேன்', 'விற்பனை',
-            'கடை', 'வியாபாரி', 'ஒப்பந்தக்காரர்', 'வழங்குநர்'
+            'கடை', 'வியாபாரி', 'ஒப்பந்தக்காரர்', 'வழங்குநர்', 'நாளைக்கு வருவேன்',
+            'எடுத்து வருவேன்', 'கொண்டு வருவேன்', 'வாங்குங்கள்', 'எடுத்துக்கொள்ளுங்கள்'
         ]
         
         self.buyer_patterns = [
@@ -118,37 +127,54 @@ class NLUAnalyzer:
             'we will buy', 'we buy', 'i will buy', 'can i get', 'give me',
             'how much', 'what is the price', 'available', 'need', 'want',
             'purchase', 'customer', 'buyer', 'shopping', 'order',
+            'we won\'t buy', 'not buying', 'refuse to buy', 'don\'t want to buy',
+            'if you come', 'if we trust', 'what should we do', 'complain',
             # Tamil patterns for buyer (Unicode)
             'வாங்குவோம்', 'வாங்குகிறேன்', 'கொடுங்கள்', 'எவ்வளவு', 'விலை என்ன',
             'உள்ளதா', 'தேவை', 'விரும்புகிறேன்', 'எடுத்துக்கொள்கிறேன்', 'வாங்க',
-            'கொடுங்க', 'வாங்குபவர்', 'வாடிக்கையாளர்', 'வாங்குதல்', 'ஆர்டர்'
+            'கொடுங்க', 'வாங்குபவர்', 'வாடிக்கையாளர்', 'வாங்குதல்', 'ஆர்டர்',
+            'வாங்காமல', 'வாங்க மாட்டோம்', 'நம்பி', 'என்ன பண்ணுறது', 'பிரச்சினை',
+            'நீங்கள் வருகிறீங்க', 'நாங்க என்ன பண்ணுறது', 'நம்பி நாங்க'
         ]
         
         # Standardized intent taxonomy with improved patterns
         self.intent_patterns = {
-            'purchase': [
-                # English
+            'purchase_positive': [
+                # English - positive purchase intent
                 'buy', 'will buy', 'purchase', 'take', 'get', 'need', 'order',
-                'want to buy', 'looking for', 'interested in',
-                # Tamil (Unicode)
+                'want to buy', 'looking for', 'interested in', 'bring', 'can you bring',
+                # Tamil (Unicode) - positive purchase intent
                 'வாங்கு', 'வாங்குவோம்', 'எடுத்துக்கொள்', 'தேவை', 'வாங்குகிறேன்',
-                'எடுத்துக்கொள்கிறேன்', 'வாங்க', 'கொடுங்கள்', 'ஆர்டர்', 'வாங்குதல்'
+                'எடுத்துக்கொள்கிறேன்', 'வாங்க', 'கொடுங்கள்', 'ஆர்டர்', 'வாங்குதல்',
+                'எடுத்து வா', 'கொண்டு வா', 'வாங்குவோம்'
             ],
-            'request': [
-                # English
+            'purchase_negative': [
+                # English - negative purchase intent (refusal, complaints)
+                'won\'t buy', 'not buying', 'refuse to buy', 'don\'t want',
+                'not buying from you', 'won\'t buy from you', 'complain',
+                # Tamil (Unicode) - negative purchase intent
+                'வாங்காமல', 'வாங்க மாட்டோம்', 'நம்பி நாங்க', 'பிரச்சினை',
+                'நீங்கள் வருகிறீங்க', 'ஒரு நாள் வருகிறீங்க', 'ஒரு நாள் வரமாற்றுறீங்க'
+            ],
+            'purchase_request': [
+                # English - requests for products/information
                 'how much', 'what is the price', 'available', 'cost', 'rate',
                 'can you', 'please', 'information', 'details', 'inquiry',
-                # Tamil (Unicode)
+                'coriander', 'curry leaves', 'gallon', 'tomatoes',
+                # Tamil (Unicode) - requests for products/information
                 'எவ்வளவு', 'விலை என்ன', 'உள்ளதா', 'செலவு', 'விகிதம்',
-                'விலை', 'உள்ளதா', 'கிடைக்குமா', 'தகவல்', 'விவரங்கள்'
+                'விலை', 'கிடைக்குமா', 'தகவல்', 'விவரங்கள்', 'கொத்தமல்லி',
+                'கருவப்புல்', 'காலான்', 'தக்காலி'
             ],
             'complaint': [
                 # English
                 'bad', 'complain', 'problem', 'issue', 'wrong', 'not good',
                 'poor quality', 'dissatisfied', 'unhappy', 'terrible',
+                'don\'t come', 'not coming', 'irregular', 'unreliable',
                 # Tamil (Unicode)
                 'மோசம்', 'பிரச்சினை', 'தவறு', 'நன்றாக இல்லை', 'புகார்',
-                'மோசமான', 'தரம் குறைவு', 'திருப்தியற்ற', 'வருத்தம்'
+                'மோசமான', 'தரம் குறைவு', 'திருப்தியற்ற', 'வருத்தம்', 'வரமாற்று',
+                'ஒரு நாள் வருகிறீங்க', 'ஒரு நாள் வரமாற்றுறீங்க'
             ],
             'product_praise': [
                 # English
@@ -156,7 +182,7 @@ class NLUAnalyzer:
                 'quality', 'fresh', 'best', 'amazing', 'perfect',
                 # Tamil (Unicode)
                 'நன்று', 'சிறந்த', 'அருமை', 'மகிழ்ச்சி', 'திருப்தி', 'நல்ல',
-                'தரம்', 'புதிய', 'சிறந்த', 'அதிசயம்', 'சரியான'
+                'தரம்', 'புதிய', 'சிறந்த', 'அதிசயம்', 'சரியான', 'நல்லா இருக்கு'
             ],
             'bargain': [
                 # English
@@ -445,6 +471,7 @@ class NLUAnalyzer:
             timestamp = self._generate_timestamp(anchor_time, start_seconds)
             
             # Create segment object with improved fields
+            english_translation = self._translate_to_english(cleaned_text)
             seg = Segment(
                 seller_id=seller_id,
                 stop_id=stop_id,
@@ -455,7 +482,9 @@ class NLUAnalyzer:
                 end_ms=end_ms,
                 duration_ms=duration_ms,
                 textTamil=cleaned_text,  # Clean Unicode Tamil text
-                textEnglish=self._translate_to_english(cleaned_text)  # Improved English translation
+                textEnglish=english_translation,  # Improved English translation
+                is_translated=bool(english_translation),
+                translation_confidence=0.8 if english_translation else 0.3
             )
             
             # Run improved NLU analysis
@@ -464,6 +493,9 @@ class NLUAnalyzer:
             self._analyze_sentiment(seg)
             self._analyze_emotion(seg)
             self._set_confidence(seg)
+            
+            # Validate and fix logical contradictions
+            self._validate_and_fix_contradictions(seg)
             
             segments.append(seg)
         
@@ -481,12 +513,43 @@ class NLUAnalyzer:
             return anchor_time
     
     def _analyze_speaker_role(self, segment: Segment):
-        """Analyze speaker role using improved text patterns."""
+        """Analyze speaker role using improved text patterns and context."""
         text_lower = segment.textTamil.lower()
+        english_lower = segment.textEnglish.lower() if segment.textEnglish else ""
         
         # Check seller patterns first (more specific)
         seller_matches = sum(1 for pattern in self.seller_patterns if pattern in text_lower)
         buyer_matches = sum(1 for pattern in self.buyer_patterns if pattern in text_lower)
+        
+        # Also check English text for additional context
+        if english_lower:
+            seller_matches += sum(1 for pattern in self.seller_patterns if pattern in english_lower)
+            buyer_matches += sum(1 for pattern in self.buyer_patterns if pattern in english_lower)
+        
+        # Context-based role determination
+        # Check for specific buyer complaint patterns
+        buyer_complaint_patterns = [
+            'நீங்கள் ஒரு நாள் வருகிறீங்க', 'ஒரு நாள் வரமாற்றுறீங்க',  # You come one day and don't come another
+            'நேற்று நீங்கள் வரவே இல்ல', 'இப்படி பண்ணீங்கன்னா',  # You didn't come yesterday, if you do this
+            'உங்களை நம்பி நாங்க காய் வாங்காமல இருக்கும்',  # We won't buy from you if we trust you
+            'நாங்க என்ன பண்ணுறது', 'பிரச்சினை'  # What should we do, problem
+        ]
+        
+        seller_promise_patterns = [
+            'நாளைக்கு வரும்போது', 'எடுத்து வரப்பாருங்க',  # When I come tomorrow, I will bring
+            'கொண்டு வருவேன்', 'வாங்குங்கள்', 'எடுத்துக்கொள்ளுங்கள்'  # I will bring, please buy, please take
+        ]
+        
+        # Check for specific patterns that override general scoring
+        for pattern in buyer_complaint_patterns:
+            if pattern in text_lower:
+                segment.speaker_role = 'buyer'
+                return
+        
+        for pattern in seller_promise_patterns:
+            if pattern in text_lower:
+                segment.speaker_role = 'seller'
+                return
         
         # Use pattern count to determine role
         if seller_matches > buyer_matches and seller_matches > 0:
@@ -500,26 +563,58 @@ class NLUAnalyzer:
     def _analyze_intent(self, segment: Segment):
         """Analyze intent using improved text patterns and scoring."""
         text_lower = segment.textTamil.lower()
+        english_lower = segment.textEnglish.lower() if segment.textEnglish else ""
         
         # Score each intent category
         intent_scores = {}
         for intent, patterns in self.intent_patterns.items():
             score = sum(1 for pattern in patterns if pattern in text_lower)
+            # Also check English text for additional context
+            if english_lower:
+                score += sum(1 for pattern in patterns if pattern in english_lower)
             intent_scores[intent] = score
         
-        # Find the intent with highest score
-        if intent_scores:
-            best_intent = max(intent_scores.items(), key=lambda x: x[1])
-            if best_intent[1] > 0:
-                segment.intent = best_intent[0]
+        # Special handling for negative purchase intent
+        # Check if this is a refusal or complaint about buying
+        negative_purchase_patterns = [
+            'வாங்காமல', 'வாங்க மாட்டோம்', 'நம்பி நாங்க',  # Won't buy, not buying from you
+            'won\'t buy', 'not buying', 'refuse to buy', 'don\'t want to buy'
+        ]
+        
+        has_negative_intent = any(pattern in text_lower for pattern in negative_purchase_patterns)
+        if english_lower:
+            has_negative_intent = has_negative_intent or any(pattern in english_lower for pattern in negative_purchase_patterns)
+        
+        # Check for specific product requests
+        product_request_patterns = [
+            'கொத்தமல்லி', 'கருவப்புல்', 'காலான்',  # Coriander, curry leaves, gallon
+            'coriander', 'curry leaves', 'gallon'
+        ]
+        
+        has_product_request = any(pattern in text_lower for pattern in product_request_patterns)
+        if english_lower:
+            has_product_request = has_product_request or any(pattern in english_lower for pattern in product_request_patterns)
+        
+        # Override intent based on context
+        if has_negative_intent:
+            segment.intent = 'purchase_negative'
+        elif has_product_request:
+            segment.intent = 'purchase_request'
+        else:
+            # Find the intent with highest score
+            if intent_scores:
+                best_intent = max(intent_scores.items(), key=lambda x: x[1])
+                if best_intent[1] > 0:
+                    segment.intent = best_intent[0]
+                else:
+                    segment.intent = 'other'
             else:
                 segment.intent = 'other'
-        else:
-            segment.intent = 'other'
     
     def _analyze_sentiment(self, segment: Segment):
         """Analyze sentiment using improved text patterns and better scoring."""
         text_lower = segment.textTamil.lower()
+        english_lower = segment.textEnglish.lower() if segment.textEnglish else ""
         
         # Enhanced sentiment scoring with context
         positive_words = [
@@ -531,19 +626,23 @@ class NLUAnalyzer:
             'மோசம்', 'மோசமான', 'வருத்தம்', 'திருப்தியற்ற', 'கோபம்', 'எரிச்சல்'
         ]
         
-        # Count positive and negative words
+        # Count positive and negative words in both languages
         positive_count = sum(1 for word in positive_words if word in text_lower)
         negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if english_lower:
+            positive_count += sum(1 for word in positive_words if word in english_lower)
+            negative_count += sum(1 for word in negative_words if word in english_lower)
         
         # Context-based sentiment adjustment
         context_multiplier = 1.0
         
         # Check for complaint context (negative sentiment)
-        if segment.intent == 'complaint':
-            context_multiplier = 1.5
+        if segment.intent == 'complaint' or segment.intent == 'purchase_negative':
+            context_multiplier = 2.0  # Stronger negative bias for complaints
         # Check for product praise context (positive sentiment)
         elif segment.intent == 'product_praise':
-            context_multiplier = 1.3
+            context_multiplier = 1.5  # Stronger positive bias for praise
         
         # Calculate sentiment score with context
         if positive_count > negative_count:
@@ -551,14 +650,25 @@ class NLUAnalyzer:
         elif negative_count > positive_count:
             score = max(-0.9, (-0.3 - (negative_count * 0.15)) * context_multiplier)
         else:
-            score = random.uniform(-0.1, 0.1)
+            # For neutral cases, apply context bias
+            if segment.intent == 'complaint' or segment.intent == 'purchase_negative':
+                score = random.uniform(-0.3, -0.1)  # Bias toward negative
+            elif segment.intent == 'product_praise':
+                score = random.uniform(0.1, 0.3)   # Bias toward positive
+            else:
+                score = random.uniform(-0.1, 0.1)  # Truly neutral
         
         segment.sentiment_score = round(score, 2)
         
-        # Improved sentiment label mapping
-        if score >= 0.15:
+        # Use standardized sentiment thresholds from config
+        # These should match the config.yaml sentiment_thresholds
+        positive_threshold = 0.15
+        negative_threshold = -0.15
+        
+        # Improved sentiment label mapping with clear thresholds
+        if score >= positive_threshold:
             segment.sentiment_label = 'positive'
-        elif score <= -0.15:
+        elif score <= negative_threshold:
             segment.sentiment_label = 'negative'
         else:
             segment.sentiment_label = 'neutral'
@@ -617,6 +727,61 @@ class NLUAnalyzer:
         confidence = min(0.95, max(0.3, confidence))  # Clamp between 0.3 and 0.95
         
         segment.confidence = round(confidence, 2)
+    
+    def _validate_and_fix_contradictions(self, segment: Segment):
+        """Validate and fix logical contradictions in the analysis."""
+        # Store original values for metadata
+        original_values = {
+            'speaker_role': segment.speaker_role,
+            'intent': segment.intent,
+            'sentiment_label': segment.sentiment_label
+        }
+        
+        # Fix 1: Negative purchase intent should have negative sentiment
+        if segment.intent == 'purchase_negative' and segment.sentiment_label == 'positive':
+            segment.sentiment_label = 'negative'
+            segment.sentiment_score = max(-0.9, segment.sentiment_score - 0.3)
+            logger.debug(f"Fixed contradiction: {segment.segment_id} - negative intent should have negative sentiment")
+        
+        # Fix 2: Complaint intent should have negative sentiment
+        if segment.intent == 'complaint' and segment.sentiment_label == 'positive':
+            segment.sentiment_label = 'negative'
+            segment.sentiment_score = max(-0.9, segment.sentiment_score - 0.3)
+            logger.debug(f"Fixed contradiction: {segment.segment_id} - complaint intent should have negative sentiment")
+        
+        # Fix 3: Product praise should have positive sentiment
+        if segment.intent == 'product_praise' and segment.sentiment_label == 'negative':
+            segment.sentiment_label = 'positive'
+            segment.sentiment_score = min(0.9, segment.sentiment_score + 0.3)
+            logger.debug(f"Fixed contradiction: {segment.segment_id} - product praise should have positive sentiment")
+        
+        # Fix 4: Buyer complaints about seller should be labeled as buyer
+        buyer_complaint_texts = [
+            'நீங்கள் ஒரு நாள் வருகிறீங்க', 'ஒரு நாள் வரமாற்றுறீங்க',  # You come one day and don't come another
+            'நேற்று நீங்கள் வரவே இல்ல', 'இப்படி பண்ணீங்கன்னா',  # You didn't come yesterday, if you do this
+            'உங்களை நம்பி நாங்க காய் வாங்காமல இருக்கும்',  # We won't buy from you if we trust you
+            'நாங்க என்ன பண்ணுறது'  # What should we do
+        ]
+        
+        if any(text in segment.textTamil for text in buyer_complaint_texts):
+            if segment.speaker_role != 'buyer':
+                segment.speaker_role = 'buyer'
+                logger.debug(f"Fixed contradiction: {segment.segment_id} - buyer complaint should be labeled as buyer")
+        
+        # Store analysis metadata for debugging
+        segment.analysis_metadata = {
+            'original_values': original_values,
+            'fixes_applied': [],
+            'validation_timestamp': datetime.now().isoformat()
+        }
+        
+        # Record any fixes that were applied
+        if original_values['speaker_role'] != segment.speaker_role:
+            segment.analysis_metadata['fixes_applied'].append('speaker_role_corrected')
+        if original_values['intent'] != segment.intent:
+            segment.analysis_metadata['fixes_applied'].append('intent_corrected')
+        if original_values['sentiment_label'] != segment.sentiment_label:
+            segment.analysis_metadata['fixes_applied'].append('sentiment_corrected')
 
 
 def main():

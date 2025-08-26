@@ -127,13 +127,31 @@ def main():
         # Step 4: Generate outputs
         logger.info("Step 4: Generating output files...")
         
-        # Write segments to JSON
+        # Sort segments by audio_file_id and timestamp for proper ordering
+        analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.start_ms))
+        
+        # Write segments to JSON with proper ordering
         segments_output = Path(config['output_dir']) / "segments.json"
         with open(segments_output, 'w', encoding='utf-8') as f:
             import json
             segments_data = [segment.to_dict() for segment in analyzed_segments]
             json.dump(segments_data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Wrote segments to: {segments_output}")
+        logger.info(f"Wrote {len(segments_data)} segments to: {segments_output}")
+        
+        # Also write segments grouped by audio file for better organization
+        audio_grouped_segments = {}
+        for segment in analyzed_segments:
+            audio_id = segment.audio_file_id
+            if audio_id not in audio_grouped_segments:
+                audio_grouped_segments[audio_id] = []
+            audio_grouped_segments[audio_id].append(segment.to_dict())
+        
+        # Write audio-grouped segments
+        for audio_id, segments in audio_grouped_segments.items():
+            audio_output = Path(config['output_dir']) / f"segments_{audio_id.replace('.wav', '')}.json"
+            with open(audio_output, 'w', encoding='utf-8') as f:
+                json.dump(segments, f, indent=2, ensure_ascii=False)
+            logger.info(f"Wrote {len(segments)} segments for {audio_id} to: {audio_output}")
         
         # Generate aggregations
         aggregator = Aggregator(config)
