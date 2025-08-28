@@ -113,14 +113,14 @@ quality_thresholds:
    ```
 
 3. **Expected outputs:**
-   - `data/outputs/segments.jsonl` - One JSON per line, per segment
+   - `data/outputs/segments.json` - Per-segment JSON array
    - `data/outputs/aggregate_stop_<STOPID>_<DATE>.json` - Stop-level summary
    - `data/outputs/aggregate_day_<SELLERID>_<DATE>.json` - Day-level summary
 
-4. **Example corrected outputs:**
-   - `segments_fixed.jsonl` - Corrected per-segment data with proper schema
-   - `aggregate_stop_STOP45_2025-08-19_fixed.json` - Fixed stop-level aggregation
-   - `aggregate_day_S123_2025-08-19_fixed.json` - Fixed day-level aggregation
+4. **Example outputs:**
+   - `data/outputs/segments.json`
+   - `data/outputs/aggregate_stop_STOP45_2025-08-19.json`
+   - `data/outputs/aggregate_day_S123_2025-08-19.json`
 
 ## Configuration
 

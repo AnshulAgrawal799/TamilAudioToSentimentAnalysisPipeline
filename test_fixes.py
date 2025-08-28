@@ -185,7 +185,7 @@ def test_contradiction_fixes():
     print(f"After fix:")
     print(f"    Intent: {segment.intent}")
     print(f"    Sentiment: {segment.sentiment_label} ({segment.sentiment_score})")
-    print(f"    Fixes applied: {segment.analysis_metadata.get('fixes_applied', [])}")
+    # analysis_metadata was removed from outputs; only verifying corrected values now
     print()
 
 def test_configuration():

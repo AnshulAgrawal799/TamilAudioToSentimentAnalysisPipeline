@@ -174,7 +174,7 @@ These fields provide deterministic pointers back to raw audio for replay, QA, an
 ├── data/
 │   ├── tmp/                       # Temporary WAV files
 │   └── outputs/                   # Final JSON outputs
-│       ├── segments.jsonl         # Per-segment data
+│       ├── segments.json          # Per-segment data (JSON array)
 │       ├── aggregate_stop_*.json  # Stop-level summaries
 │       └── aggregate_day_*.json   # Day-level summaries
 ├── src/                           # Pipeline scripts
@@ -301,7 +301,7 @@ python src/main.py --config config.yaml
 ```
 
 ### 8.2 Expected Outputs
-- `data/outputs/segments.jsonl` - One JSON per line, per segment with audio mapping fields
+- `data/outputs/segments.json` - Per-segment JSON array with audio mapping fields
 - `data/outputs/aggregate_stop_<STOPID>_<DATE>.json` - Stop-level summary with audio file statistics
 - `data/outputs/aggregate_day_<SELLERID>_<DATE>.json` - Day-level summary with audio file statistics
 
@@ -318,9 +318,9 @@ python src/main.py --config config.yaml
 - **Enhanced Debugging**: Aggregates now provide complete audio mapping information for QA and troubleshooting
 
 ### 8.3 Example Output Files
-- `segments_fixed.jsonl` - Corrected per-segment data with proper schema
-- `aggregate_stop_STOP45_2025-08-19_fixed.json` - Fixed stop-level aggregation
-- `aggregate_day_S123_2025-08-19_fixed.json` - Fixed day-level aggregation
+- `data/outputs/segments.json`
+- `data/outputs/aggregate_stop_STOP45_2025-08-19.json`
+- `data/outputs/aggregate_day_S123_2025-08-19.json`
 
 ---
 

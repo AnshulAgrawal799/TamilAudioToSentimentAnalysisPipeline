@@ -63,7 +63,6 @@ class Segment:
         # New fields for better tracking
         self.translation_confidence = kwargs.get('translation_confidence', 0.5)
         self.is_translated = kwargs.get('is_translated', False)
-        self.analysis_metadata = kwargs.get('analysis_metadata', {})
         # Extended fields per new spec
         self.role_confidence = kwargs.get('role_confidence', 0.5)
         self.products = kwargs.get('products', [])
@@ -93,7 +92,6 @@ class Segment:
             'duration_ms': self.duration_ms,
             'translation_confidence': self.translation_confidence,
             'is_translated': self.is_translated,
-            'analysis_metadata': self.analysis_metadata,
             'role_confidence': self.role_confidence,
             'products': self.products,
             'action_required': self.action_required,
@@ -839,7 +837,7 @@ class NLUAnalyzer:
     
     def _validate_and_fix_contradictions(self, segment: Segment):
         """Validate and fix logical contradictions in the analysis."""
-        # Store original values for metadata
+        # Store original values locally for comparison
         original_values = {
             'speaker_role': segment.speaker_role,
             'intent': segment.intent,
@@ -877,20 +875,7 @@ class NLUAnalyzer:
                 segment.speaker_role = 'buyer'
                 logger.debug(f"Fixed contradiction: {segment.segment_id} - buyer complaint should be labeled as buyer")
         
-        # Store analysis metadata for debugging
-        segment.analysis_metadata = {
-            'original_values': original_values,
-            'fixes_applied': [],
-            'validation_timestamp': datetime.now().isoformat()
-        }
-        
-        # Record any fixes that were applied
-        if original_values['speaker_role'] != segment.speaker_role:
-            segment.analysis_metadata['fixes_applied'].append('speaker_role_corrected')
-        if original_values['intent'] != segment.intent:
-            segment.analysis_metadata['fixes_applied'].append('intent_corrected')
-        if original_values['sentiment_label'] != segment.sentiment_label:
-            segment.analysis_metadata['fixes_applied'].append('sentiment_corrected')
+        # No analysis metadata is stored in output; this method now only corrects values
 
 
 def main():

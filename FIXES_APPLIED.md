@@ -130,17 +130,11 @@ fixes = {
 
 ## New Features Added
 
-### 1. Analysis Metadata Tracking
-- Each segment now includes `analysis_metadata` with:
-  - Original analysis values
-  - List of fixes applied
-  - Timestamp of validation
-
-### 2. Audio-Grouped Outputs
+### 1. Audio-Grouped Outputs
 - Separate JSON files for each audio file
 - Better organization for downstream processing
 
-### 3. Enhanced Confidence Scoring
+### 2. Enhanced Confidence Scoring
 - Improved confidence calculation based on:
   - Text length
   - Pattern matches
