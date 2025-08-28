@@ -64,6 +64,13 @@ class Segment:
         self.translation_confidence = kwargs.get('translation_confidence', 0.5)
         self.is_translated = kwargs.get('is_translated', False)
         self.analysis_metadata = kwargs.get('analysis_metadata', {})
+        # Extended fields per new spec
+        self.role_confidence = kwargs.get('role_confidence', 0.5)
+        self.products = kwargs.get('products', [])
+        self.action_required = kwargs.get('action_required', False)
+        self.escalation_needed = kwargs.get('escalation_needed', False)
+        self.churn_risk = kwargs.get('churn_risk', 'low')  # low/medium/high
+        self.business_opportunity = kwargs.get('business_opportunity', False)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -86,7 +93,13 @@ class Segment:
             'duration_ms': self.duration_ms,
             'translation_confidence': self.translation_confidence,
             'is_translated': self.is_translated,
-            'analysis_metadata': self.analysis_metadata
+            'analysis_metadata': self.analysis_metadata,
+            'role_confidence': self.role_confidence,
+            'products': self.products,
+            'action_required': self.action_required,
+            'escalation_needed': self.escalation_needed,
+            'churn_risk': self.churn_risk,
+            'business_opportunity': self.business_opportunity
         }
     
 
@@ -472,6 +485,11 @@ class NLUAnalyzer:
             
             # Create segment object with improved fields
             english_translation = self._translate_to_english(cleaned_text)
+            # Enrich too-short translations for requests
+            if english_translation and len(english_translation.split()) < self.config.get('translation', {}).get('min_words_english', 4):
+                enriched = self._enrich_short_translation(cleaned_text, english_translation)
+                if enriched:
+                    english_translation = enriched
             seg = Segment(
                 seller_id=seller_id,
                 stop_id=stop_id,
@@ -501,6 +519,36 @@ class NLUAnalyzer:
         
         logger.info(f"Analyzed {len(segments)} segments")
         return segments
+
+    def _enrich_short_translation(self, tamil_text: str, english_text: str) -> str:
+        """Heuristically expand terse translations to preserve request intent and modifiers."""
+        t = tamil_text.lower()
+        # Request cues
+        request_cues = ['கொடுங்களே', 'கொடுங்க', 'கொடுக்க', 'கொடுக்கலாம்', 'கொஞ்சம்', 'கொடு']
+        has_request = any(cue in t for cue in request_cues)
+        # Product mentions
+        has_coriander = 'கொத்தமல்லி' in t
+        has_curry = 'கருவப்புல்' in t
+        # Build enriched sentence
+        if has_request and (has_coriander or has_curry):
+            products = []
+            if has_coriander:
+                products.append('coriander')
+            if has_curry:
+                products.append('curry leaves')
+            if 'கொஞ்சம்' in t:
+                quantity = 'some'
+            else:
+                quantity = 'some'
+            if len(products) == 2:
+                product_phrase = f"{products[0]} and {products[1]}"
+            else:
+                product_phrase = products[0]
+            return f"Please give {quantity} {product_phrase}."
+        # If it looks like a product-only mention, add polite request
+        if english_text.strip().lower() in ['coriander', 'curry leaves', 'tomato', 'tomatoes']:
+            return f"{english_text.strip()} please."
+        return ""
     
     def _generate_timestamp(self, anchor_time: str, offset_seconds: float) -> str:
         """Generate ISO timestamp from anchor time and offset."""
@@ -556,9 +604,21 @@ class NLUAnalyzer:
             segment.speaker_role = 'seller'
         elif buyer_matches > seller_matches and buyer_matches > 0:
             segment.speaker_role = 'buyer'
+        elif seller_matches == 0 and buyer_matches == 0 and (('good' in english_lower) or ('நல்லா' in text_lower)):
+            # Likely a passerby/customer praising products
+            segment.speaker_role = 'customer_bystander'
         else:
             # Default to 'other' if no clear pattern or equal matches
             segment.speaker_role = 'other'
+
+        # role confidence heuristic
+        total_matches = seller_matches + buyer_matches
+        if segment.speaker_role in ['seller', 'buyer'] and total_matches > 0:
+            segment.role_confidence = min(0.95, 0.5 + 0.2 * total_matches)
+        elif segment.speaker_role == 'customer_bystander':
+            segment.role_confidence = 0.6
+        else:
+            segment.role_confidence = 0.4
     
     def _analyze_intent(self, segment: Segment):
         """Analyze intent using improved text patterns and scoring."""
@@ -610,6 +670,13 @@ class NLUAnalyzer:
                     segment.intent = 'other'
             else:
                 segment.intent = 'other'
+
+        # Map borderline 'other' to complaint/request if clear hints exist
+        if segment.intent == 'other':
+            if any(p in text_lower for p in ['பிரச்சினை', 'வரமாட்டுறீங்க', 'வரவே இல்ல']) or any(p in english_lower for p in ['problem', 'complain', 'don\'t come', 'not coming']):
+                segment.intent = 'complaint'
+            elif any(p in text_lower for p in ['எவ்வளவு', 'விலை', 'கொடுக்க', 'கொடுங்கள்', 'கிடைக்குமா']) or any(p in english_lower for p in ['how much', 'price', 'can you', 'give me']):
+                segment.intent = 'purchase_request'
     
     def _analyze_sentiment(self, segment: Segment):
         """Analyze sentiment using improved text patterns and better scoring."""
@@ -661,9 +728,9 @@ class NLUAnalyzer:
         segment.sentiment_score = round(score, 2)
         
         # Use standardized sentiment thresholds from config
-        # These should match the config.yaml sentiment_thresholds
-        positive_threshold = 0.15
-        negative_threshold = -0.15
+        thresholds = self.config.get('sentiment_thresholds', {})
+        positive_threshold = thresholds.get('positive', 0.15)
+        negative_threshold = thresholds.get('negative', -0.15)
         
         # Improved sentiment label mapping with clear thresholds
         if score >= positive_threshold:
@@ -684,17 +751,14 @@ class NLUAnalyzer:
                     segment.emotion = emotion
                     return
         
-        # Default emotion based on sentiment and intent
+        # Default emotion based on sentiment and intent (granular mapping)
         if segment.sentiment_label == 'positive':
-            if segment.intent == 'product_praise':
-                segment.emotion = 'happy'
-            else:
-                segment.emotion = 'happy'
+            segment.emotion = 'happy' if segment.intent in ['product_praise', 'purchase_positive'] else 'satisfied'
         elif segment.sentiment_label == 'negative':
-            if segment.intent == 'complaint':
-                segment.emotion = 'disappointed'
+            if segment.intent in ['complaint', 'purchase_negative']:
+                segment.emotion = 'frustrated' if 'angry' in text_lower or 'கோபம்' in text_lower else 'disappointed'
             else:
-                segment.emotion = 'disappointed'
+                segment.emotion = 'annoyed'
         else:
             segment.emotion = 'neutral'
     
@@ -719,14 +783,59 @@ class NLUAnalyzer:
         
         # Adjust based on translation quality
         translation_quality = 0.5  # Base translation quality
-        if segment.textEnglish and len(segment.textEnglish.split()) > 2:
+        min_words_en = self.config.get('translation', {}).get('min_words_english', 4)
+        if segment.textEnglish and len(segment.textEnglish.split()) >= min_words_en:
             translation_quality = 0.8
+        else:
+            # Penalize low completeness translations
+            penalty = self.config.get('translation', {}).get('low_confidence_penalty', 0.2)
+            segment.translation_confidence = max(0.0, segment.translation_confidence - penalty)
         
         # Calculate final confidence
         confidence = base_confidence + (length_factor * 0.15) + (pattern_factor * 0.1) + (translation_quality * 0.05)
         confidence = min(0.95, max(0.3, confidence))  # Clamp between 0.3 and 0.95
         
         segment.confidence = round(confidence, 2)
+
+        # Derive business flags after we have sentiment/intent
+        self._set_business_flags(segment)
+
+    def _extract_products(self, segment: Segment) -> List[str]:
+        """Extract product entities for SKU analytics."""
+        text = (segment.textTamil + ' ' + (segment.textEnglish or '')).lower()
+        products = []
+        if any(term in text for term in ['தக்காலி', 'tomato', 'tomatoes']):
+            products.append('tomato')
+        if any(term in text for term in ['கொத்தமல்லி', 'coriander']):
+            products.append('coriander')
+        if any(term in text for term in ['கருவப்புல்', 'curry leaves', 'curry_leaf', 'curryleaf']):
+            products.append('curry_leaf')
+        if any(term in text for term in ['காலான்', 'gallon']):
+            products.append('gallon')
+        if any(term in text for term in ['தேங்காய்', 'coconut', 'தனமு']):
+            products.append('coconut')
+        # Deduplicate
+        return sorted(list(dict.fromkeys(products)))
+
+    def _set_business_flags(self, segment: Segment) -> None:
+        """Set action flags and churn/opportunity heuristics."""
+        # Entities
+        segment.products = self._extract_products(segment)
+
+        # Action flags
+        segment.action_required = segment.intent in ['complaint', 'purchase_negative']
+        segment.escalation_needed = segment.action_required and (segment.sentiment_label == 'negative')
+
+        # Churn risk
+        if segment.intent in ['purchase_negative', 'complaint']:
+            segment.churn_risk = 'high'
+        elif segment.intent == 'purchase_request' and segment.sentiment_label == 'negative':
+            segment.churn_risk = 'medium'
+        else:
+            segment.churn_risk = 'low'
+
+        # Opportunity flag
+        segment.business_opportunity = segment.intent in ['product_praise', 'purchase_request', 'purchase_positive']
     
     def _validate_and_fix_contradictions(self, segment: Segment):
         """Validate and fix logical contradictions in the analysis."""

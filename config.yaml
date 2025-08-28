@@ -21,10 +21,17 @@ language: "ta"
 fields:
   textTamil: "Tamil text from transcription"
   textEnglish: "English translation text"
-  speaker_roles: ["buyer", "seller", "other"]
-  intent_categories: ["purchase_positive", "purchase_negative", "purchase_request", "complaint", "product_praise", "bargain", "greeting", "other"]
+  speaker_roles: ["buyer", "seller", "customer_bystander", "other"]
+  intent_categories: ["complaint", "purchase_request", "purchase_positive", "purchase_negative", "product_praise", "request_resolution", "other"]
   sentiment_labels: ["positive", "neutral", "negative"]
-  emotion_categories: ["happy", "neutral", "disappointed"]
+  emotion_categories: ["happy", "satisfied", "neutral", "annoyed", "disappointed", "frustrated"]
+  new_fields:
+    - role_confidence
+    - products
+    - action_required
+    - escalation_needed
+    - churn_risk
+    - business_opportunity
 
 # Sentiment analysis thresholds
 sentiment_thresholds:
@@ -54,6 +61,9 @@ min_segment_words: 4
 # Translation settings
 translation:
   use_google_cloud: true  # Use Google Cloud Translate API for better quality
+  fallback_to_googletrans: true
+  min_words_english: 4       # Flag translations shorter than this
+  low_confidence_penalty: 0.2
   fallback_to_googletrans: true  # Fallback to googletrans if Google Cloud unavailable
   batch_size: 10  # Process translations in batches
   retry_attempts: 3  # Number of retry attempts for failed translations
