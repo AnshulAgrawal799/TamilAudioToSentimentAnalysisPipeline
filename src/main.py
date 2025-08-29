@@ -45,6 +45,65 @@ def setup_directories(config: Dict[str, Any]) -> None:
         logger.info(f"Ensured directory exists: {dir_path}")
 
 
+def _normalize_products_field(raw_products) -> list:
+    """Normalize the products field to a list of lowercase, deduped tokens.
+
+    Accepts list, comma-separated string, empty string, or None.
+    Returns a list with first-seen order preserved.
+    """
+    tokens = []
+    if raw_products is None:
+        return tokens
+    if isinstance(raw_products, list):
+        candidate_tokens = raw_products
+    elif isinstance(raw_products, str):
+        # Allow comma-separated strings
+        candidate_tokens = raw_products.split(',') if raw_products else []
+    else:
+        # Unsupported type → treat as no products
+        candidate_tokens = []
+
+    seen = set()
+    for tok in candidate_tokens:
+        if tok is None:
+            continue
+        norm = str(tok).strip().lower()
+        if not norm:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            tokens.append(norm)
+    return tokens
+
+
+def _annotate_product_intents(segments_data: list, product_intent_map: Dict[str, str]) -> None:
+    """Attach product_intents to segments in-place based on PRODUCT_INTENT_MAP.
+
+    - Case-insensitive lookup
+    - Only add product_intents key if at least one product maps
+    - Do not modify segments with no matches
+    """
+    if not segments_data or not isinstance(product_intent_map, dict):
+        return
+
+    # Build a case-insensitive map
+    ci_map = {str(k).strip().lower(): v for k, v in product_intent_map.items() if k is not None}
+
+    for seg in segments_data:
+        raw_products = seg.get('products')
+        norm_products = _normalize_products_field(raw_products)
+        if not norm_products:
+            continue
+
+        mapped: Dict[str, str] = {}
+        for p in norm_products:
+            if p in ci_map:
+                mapped[p] = ci_map[p]
+
+        if mapped:
+            seg['product_intents'] = mapped
+
+
 def main():
     """Main pipeline execution."""
     parser = argparse.ArgumentParser(description='Tamil Audio to Sentiment Analysis Pipeline')
@@ -135,6 +194,8 @@ def main():
         with open(segments_output, 'w', encoding='utf-8') as f:
             import json
             segments_data = [segment.to_dict() for segment in analyzed_segments]
+            # Deterministic post-processing: map products to product_intents
+            _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
             json.dump(segments_data, f, indent=2, ensure_ascii=False)
         logger.info(f"Wrote {len(segments_data)} segments to: {segments_output}")
         
@@ -150,6 +211,8 @@ def main():
         for audio_id, segments in audio_grouped_segments.items():
             audio_output = Path(config['output_dir']) / f"segments_{audio_id.replace('.wav', '')}.json"
             with open(audio_output, 'w', encoding='utf-8') as f:
+                # Apply the same deterministic post-processing per file
+                _annotate_product_intents(segments, config.get('PRODUCT_INTENT_MAP', {}))
                 json.dump(segments, f, indent=2, ensure_ascii=False)
             logger.info(f"Wrote {len(segments)} segments for {audio_id} to: {audio_output}")
         

@@ -17,6 +17,14 @@ audio_processing:
 asr_model: "large-v3"  # Upgraded from "small" for better Tamil transcription
 language: "ta"
 
+# Map detected product names to product-intent tags
+PRODUCT_INTENT_MAP:
+  tomato: product_praise
+  coriander: purchase_request
+  curry_leaf: purchase_request
+  coconut: purchase_positive
+  gallon: purchase_request
+
 # Field definitions
 fields:
   textTamil: "Tamil text from transcription"
