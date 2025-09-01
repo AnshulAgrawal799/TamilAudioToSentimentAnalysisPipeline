@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Transcription module using Whisper ASR for Tamil audio.
+Transcription module using Whisper ASR for Tamil audio (fallback provider).
 Handles audio transcription and segment generation.
 """
 
@@ -40,12 +40,13 @@ class TranscriptionResult:
 
 
 class Transcriber:
-    """Handles audio transcription using Whisper."""
+    """Handles audio transcription using Whisper (fallback provider)."""
     
     def __init__(self, config: Dict[str, Any]):
         """Initialize with configuration."""
         self.config = config
-        self.model_name = config.get('asr_model', 'whisper-small')
+        # Use fallback Whisper model (smaller than the original large-v3)
+        self.model_name = config.get('whisper_model', 'medium')
         self.language = config.get('language', 'ta')
         self.model = None
         
@@ -76,7 +77,7 @@ class Transcriber:
         result.model_used = self.model_name
         
         try:
-            logger.info(f"Transcribing: {audio_file.name}")
+            logger.info(f"Transcribing with Whisper: {audio_file.name}")
             
             # Run Whisper transcription with improved settings
             whisper_result = self.model.transcribe(

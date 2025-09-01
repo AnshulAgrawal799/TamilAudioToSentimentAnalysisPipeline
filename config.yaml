@@ -14,8 +14,21 @@ audio_processing:
   overwrite_existing_wav: false     # set true to force reconversion even if WAV exists
 
 # ASR settings
-asr_model: "large-v3"  # Upgraded from "small" for better Tamil transcription
-language: "ta"
+asr_provider: "sarvam"              # "sarvam" or "whisper" (fallback)
+asr_model: "saarika:v2.5"           # Sarvam model for Tamil speech->text
+asr_language_code: "ta-IN"          # Tamil language code for Sarvam
+asr_batch_enabled: true             # Use batch API for longer files
+asr_batch_max_files_per_job: 20     # Max files per batch job
+asr_concurrency_limit: 3            # Max concurrent uploads/requests
+asr_retry:
+  max_attempts: 5
+  backoff_factor: 2
+transcript_cache_enabled: true      # Cache transcripts to avoid re-transcribing
+transcript_cache_ttl_days: 30       # Cache TTL in days
+
+# Whisper fallback settings (used when asr_provider="whisper")
+whisper_model: "medium"             # Fallback Whisper model (smaller than large-v3)
+language: "ta"                      # Tamil language for Whisper
 
 # Map detected product names to product-intent tags
 PRODUCT_INTENT_MAP:

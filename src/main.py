@@ -7,11 +7,23 @@ Runs the complete workflow: audio ingestion → transcription → analysis → a
 import argparse
 import logging
 import sys
+import os
 from pathlib import Path
 from typing import Dict, Any
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Set API key directly for testing (remove this in production)
+if not os.getenv('SARVAM_API_KEY'):
+    os.environ['SARVAM_API_KEY'] = 'sk_ttjsa620_dbdCrZsL8KDdf0qs0JtiEOJr'
+
 from ingest_audio import AudioIngester
-from transcribe import Transcriber
+from transcriber_factory import UnifiedTranscriber
 from analyze import NLUAnalyzer
 from aggregate import Aggregator
 
@@ -112,6 +124,8 @@ def main():
     parser.add_argument('--output-dir', help='Override output directory from config')
     parser.add_argument('--skip-audio-conversion', action='store_true', 
                        help='Skip MP3 to WAV conversion (assume WAV files exist)')
+    parser.add_argument('--provider', choices=['sarvam', 'whisper'], 
+                       help='Override ASR provider from config')
     
     args = parser.parse_args()
     
@@ -123,10 +137,13 @@ def main():
         config['audio_dir'] = args.audio_dir
     if args.output_dir:
         config['output_dir'] = args.output_dir
+    if args.provider:
+        config['asr_provider'] = args.provider
     
     logger.info("Starting Tamil Audio to Sentiment Analysis Pipeline")
     logger.info(f"Audio directory: {config['audio_dir']}")
     logger.info(f"Output directory: {config['output_dir']}")
+    logger.info(f"ASR Provider: {config.get('asr_provider', 'sarvam')}")
     
     # Log audio processing configuration
     audio_config = config.get('audio_processing', {})
@@ -159,15 +176,19 @@ def main():
         
         # Step 2: Transcription
         logger.info("Step 2: Transcribing audio files...")
-        transcriber = Transcriber(config)
+        transcriber = UnifiedTranscriber(config)
+        
+        # Use individual transcription for now since batch API endpoints are returning 404
+        logger.info("Using individual transcription with Sarvam")
         transcript_results = []
         for wav_file in wav_files:
             try:
                 result = transcriber.transcribe(wav_file)
                 transcript_results.append(result)
-                logger.info(f"Transcribed: {wav_file.name}")
+                logger.info(f"Transcribed: {wav_file.name} ({result.provider}/{result.model_used})")
             except Exception as e:
                 logger.error(f"Failed to transcribe {wav_file}: {e}")
+                continue
         
         if not transcript_results:
             logger.error("No transcriptions completed successfully")

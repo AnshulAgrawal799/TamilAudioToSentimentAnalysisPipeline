@@ -494,7 +494,7 @@ class NLUAnalyzer:
             if len(cleaned_text.split()) < self.min_segment_words:
                 continue
             
-            # Get timing information from Whisper segment
+            # Get timing information from segment
             start_seconds = segment.get('start', 0.0)
             end_seconds = segment.get('end', start_seconds + 1.0)
             start_ms = int(start_seconds * 1000)
@@ -527,8 +527,23 @@ class NLUAnalyzer:
                 asr_confidence=segment.get('confidence', 0.8)
             )
             
-            # Run improved NLU analysis
-            self._analyze_speaker_role(seg)
+            # Use speaker information from Sarvam if available, otherwise analyze
+            if segment.get('speaker'):
+                # Map Sarvam speaker labels to our speaker roles
+                sarvam_speaker = segment.get('speaker', '').lower()
+                if 'seller' in sarvam_speaker or 'vendor' in sarvam_speaker:
+                    seg.speaker_role = 'seller'
+                    seg.role_confidence = 0.9  # High confidence for vendor-provided speaker info
+                elif 'buyer' in sarvam_speaker or 'customer' in sarvam_speaker:
+                    seg.speaker_role = 'buyer'
+                    seg.role_confidence = 0.9
+                else:
+                    # Fall back to text-based analysis for unknown speaker labels
+                    self._analyze_speaker_role(seg)
+            else:
+                # No speaker info from provider, use text-based analysis
+                self._analyze_speaker_role(seg)
+            
             self._analyze_intent(seg)
             self._analyze_sentiment(seg)
             self._analyze_emotion(seg)
