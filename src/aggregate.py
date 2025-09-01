@@ -79,6 +79,7 @@ class Aggregator:
             dominant_emotion = self._calculate_dominant_emotion(stop_segments)
             top_intents = self._calculate_top_intents(stop_segments)
             audio_file_stats = self._calculate_audio_file_stats(stop_segments)
+            review_stats = self._calculate_review_statistics(stop_segments)
             
             # Get placeholder data
             sales_data = self.placeholders.get('sales_at_stop', {})
@@ -97,7 +98,8 @@ class Aggregator:
                 'top_intents': top_intents,
                 'audio_files': audio_file_stats,
                 'sales_at_stop': sales_data,
-                'inventory_after_sale': inventory_data
+                'inventory_after_sale': inventory_data,
+                'review_statistics': review_stats
             }
             
             stop_aggregates[stop_id] = stop_aggregate
@@ -132,6 +134,7 @@ class Aggregator:
             dominant_emotion = self._calculate_dominant_emotion(day_segments)
             intent_dist = self._calculate_intent_distribution(day_segments)
             audio_file_stats = self._calculate_audio_file_stats(day_segments)
+            review_stats = self._calculate_review_statistics(day_segments)
             
             # Get placeholder data
             total_sales = self.placeholders.get('sales_at_stop', {})
@@ -150,7 +153,8 @@ class Aggregator:
                 'intent_distribution': intent_dist,
                 'audio_files': audio_file_stats,
                 'total_sales': total_sales,
-                'closing_inventory': closing_inventory
+                'closing_inventory': closing_inventory,
+                'review_statistics': review_stats
             }
             
             day_aggregates[seller_id] = day_aggregate
@@ -244,6 +248,58 @@ class Aggregator:
         counter = Counter(intents)
         
         return dict(counter)
+
+    def _calculate_review_statistics(self, segments: List) -> Dict[str, Any]:
+        """Calculate human review statistics for segments."""
+        if not segments:
+            return {
+                'total_segments': 0,
+                'needs_review': 0,
+                'review_percentage': 0.0,
+                'review_reasons': {
+                    'asr_low_confidence': 0,
+                    'translation_low_confidence': 0,
+                    'high_risk_negative': 0
+                }
+            }
+        
+        total_segments = len(segments)
+        needs_review = 0
+        review_reasons = {
+            'asr_low_confidence': 0,
+            'translation_low_confidence': 0,
+            'high_risk_negative': 0
+        }
+        
+        for segment in segments:
+            # Check if segment needs review
+            segment_dict = segment.to_dict()
+            if segment_dict.get('needs_human_review', False):
+                needs_review += 1
+                
+                # Count reasons for review
+                asr_conf = getattr(segment, 'asr_confidence', 1.0)
+                trans_conf = getattr(segment, 'translation_confidence', 1.0)
+                
+                if asr_conf is not None and asr_conf < 0.65:
+                    review_reasons['asr_low_confidence'] += 1
+                
+                if trans_conf is not None and trans_conf < 0.65:
+                    review_reasons['translation_low_confidence'] += 1
+                
+                if (getattr(segment, 'sentiment_label', 'neutral') == 'negative' and
+                    getattr(segment, 'churn_risk', 'low') == 'high' and
+                    getattr(segment, 'role_confidence', 0.0) >= 0.5):
+                    review_reasons['high_risk_negative'] += 1
+        
+        review_percentage = (needs_review / total_segments * 100) if total_segments > 0 else 0.0
+        
+        return {
+            'total_segments': total_segments,
+            'needs_review': needs_review,
+            'review_percentage': round(review_percentage, 1),
+            'review_reasons': review_reasons
+        }
 
 
 def main():

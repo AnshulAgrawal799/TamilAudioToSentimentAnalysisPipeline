@@ -213,7 +213,12 @@ MP3 Files → WAV Conversion → Whisper ASR → NLU Analysis → Aggregation �
   "sentiment_score": 0.2,
   "sentiment_label": "positive",
   "emotion": "neutral",
-  "confidence": 0.85
+  "confidence": 0.85,
+  "translation_confidence": 0.8,
+  "role_confidence": 0.6,
+  "churn_risk": "low",
+  "asr_confidence": 0.9,
+  "needs_human_review": false
 }
 ```
 
@@ -224,6 +229,13 @@ MP3 Files → WAV Conversion → Whisper ASR → NLU Analysis → Aggregation �
 - `duration_ms`: Segment duration in milliseconds (end_ms - start_ms)
 
 These fields enable precise audio replay and debugging by providing deterministic pointers back to the raw audio source.
+
+**New Quality Review Flag:**
+- `needs_human_review` (boolean, default `false`)
+  - Set to `true` when any of the following are met:
+    - `asr_confidence < 0.65`
+    - `translation_confidence < 0.65`
+    - `sentiment_label == "negative"` AND `churn_risk == "high"` AND `role_confidence >= 0.5`
 
 **Key Fixes Applied:**
 - ✅ Added `textTamil` and `textEnglish` fields
@@ -248,9 +260,29 @@ These fields enable precise audio replay and debugging by providing deterministi
     "inquiry": 1, "complaint": 1, "greeting": 1
   },
   "sales_at_stop": {"tomato": 36, "onion": 15, "potato": 10},
-  "inventory_after_sale": {"tomato": 22, "onion": 5, "potato": 8}
+  "inventory_after_sale": {"tomato": 22, "onion": 5, "potato": 8},
+  "review_statistics": {
+    "total_segments": 15,
+    "needs_review": 3,
+    "review_percentage": 20.0,
+    "review_reasons": {
+      "asr_low_confidence": 1,
+      "translation_low_confidence": 1,
+      "high_risk_negative": 1
+    }
+  }
 }
 ```
+
+**New Review Statistics Field:**
+- `review_statistics`: Aggregated human review metrics
+  - `total_segments`: Total number of segments analyzed
+  - `needs_review`: Number of segments flagged for human review
+  - `review_percentage`: Percentage of segments needing review (0.0-100.0)
+  - `review_reasons`: Breakdown of why segments need review:
+    - `asr_low_confidence`: Segments with ASR confidence < 0.65
+    - `translation_low_confidence`: Segments with translation confidence < 0.65
+    - `high_risk_negative`: High-risk negative segments (negative sentiment + high churn + role confidence ≥ 0.5)
 
 ## Enhanced NLU Analysis
 

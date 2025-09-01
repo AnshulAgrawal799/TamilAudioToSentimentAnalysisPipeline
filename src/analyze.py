@@ -70,9 +70,14 @@ class Segment:
         self.escalation_needed = kwargs.get('escalation_needed', False)
         self.churn_risk = kwargs.get('churn_risk', 'low')  # low/medium/high
         self.business_opportunity = kwargs.get('business_opportunity', False)
+        # ASR confidence and human review flag
+        self.asr_confidence = kwargs.get('asr_confidence', 0.8)
+        self.needs_human_review = kwargs.get('needs_human_review', False)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        # Always compute current human-review flag at serialization time
+        needs_review = self._compute_needs_human_review()
         return {
             'seller_id': self.seller_id,
             'stop_id': self.stop_id,
@@ -97,8 +102,26 @@ class Segment:
             'action_required': self.action_required,
             'escalation_needed': self.escalation_needed,
             'churn_risk': self.churn_risk,
-            'business_opportunity': self.business_opportunity
+            'business_opportunity': self.business_opportunity,
+            'asr_confidence': self.asr_confidence,
+            'needs_human_review': needs_review
         }
+
+    def _compute_needs_human_review(self) -> bool:
+        """Derive whether this segment needs human review based on configured rules."""
+        try:
+            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.65)
+        except Exception:
+            asr_low = False
+        translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.65)
+        risk_condition = (self.sentiment_label == 'negative' and self.churn_risk == 'high' and (self.role_confidence or 0.0) >= 0.5)
+        self.needs_human_review = bool(asr_low or translation_low or risk_condition)
+        return self.needs_human_review
+
+    def to_json(self) -> str:
+        """Serialize this segment to a JSON string."""
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False)
     
 
 
@@ -500,7 +523,8 @@ class NLUAnalyzer:
                 textTamil=cleaned_text,  # Clean Unicode Tamil text
                 textEnglish=english_translation,  # Improved English translation
                 is_translated=bool(english_translation),
-                translation_confidence=0.8 if english_translation else 0.3
+                translation_confidence=0.8 if english_translation else 0.3,
+                asr_confidence=segment.get('confidence', 0.8)
             )
             
             # Run improved NLU analysis
@@ -512,6 +536,9 @@ class NLUAnalyzer:
             
             # Validate and fix logical contradictions
             self._validate_and_fix_contradictions(seg)
+
+            # Compute final needs_human_review flag now that all fields are set
+            seg._compute_needs_human_review()
             
             segments.append(seg)
         
