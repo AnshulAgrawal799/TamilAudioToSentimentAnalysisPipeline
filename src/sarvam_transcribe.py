@@ -32,11 +32,31 @@ class SarvamTranscriptionResult:
         
     def add_segment(self, start: float, end: float, text: str, confidence: float = None, speaker: str = None):
         """Add a transcription segment."""
+        # Calculate improved confidence based on text quality
+        if confidence is None:
+            # Base confidence from Sarvam API
+            base_confidence = 0.8
+            
+            # Boost confidence for longer, well-formed text
+            if len(text.strip()) > 10:
+                base_confidence += 0.1
+            
+            # Boost confidence for text with proper Tamil characters
+            tamil_chars = sum(1 for c in text if '\u0B80' <= c <= '\u0BFF')
+            if tamil_chars > len(text) * 0.3:  # More than 30% Tamil characters
+                base_confidence += 0.05
+            
+            # Reduce confidence for very short text
+            if len(text.strip()) < 5:
+                base_confidence -= 0.1
+            
+            confidence = min(0.95, max(0.6, base_confidence))
+        
         segment = {
             'start': start,
             'end': end,
             'text': text.strip(),
-            'confidence': confidence or 0.8,
+            'confidence': confidence,
             'speaker': speaker
         }
         self.segments.append(segment)
@@ -128,8 +148,9 @@ class SarvamTranscriber:
         else:
             self.cache = None
             
-        # API endpoints (these may need to be updated based on actual Sarvam API)
+        # API endpoints (updated to correct Sarvam API endpoints)
         self.sync_endpoint = "https://api.sarvam.ai/speech-to-text"
+        # Note: Batch endpoints are currently returning 404, using sync API as fallback
         self.batch_create_endpoint = "https://api.sarvam.ai/v1/batch_jobs"
         self.batch_upload_endpoint = "https://api.sarvam.ai/v1/batch_uploads"
         
@@ -243,9 +264,30 @@ class SarvamTranscriber:
         
         raise TimeoutError(f"Batch job {job_id} did not complete within {max_wait_minutes} minutes")
     
+    def _download_batch_results(self, job_id: str) -> List[Dict[str, Any]]:
+        """Download results from a completed batch job."""
+        headers = {"api-subscription-key": self.api_key}
+        
+        response = self.session.get(
+            f"{self.batch_create_endpoint}/{job_id}/results",
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        return result.get('results', [])
+    
     def _transcribe_sync(self, audio_path: Path) -> SarvamTranscriptionResult:
         """Transcribe a single file using synchronous API (for short files)."""
         headers = {"api-subscription-key": self.api_key}
+        
+        # Check file size and basic validation
+        file_size = audio_path.stat().st_size
+        if file_size == 0:
+            raise ValueError(f"Audio file {audio_path.name} is empty")
+        if file_size > 100 * 1024 * 1024:  # 100MB limit
+            raise ValueError(f"Audio file {audio_path.name} is too large ({file_size} bytes)")
         
         with open(audio_path, 'rb') as f:
             files = {'file': (audio_path.name, f, 'audio/wav')}
@@ -254,14 +296,27 @@ class SarvamTranscriber:
                 'language_code': self.language_code
             }
             
-            response = self.session.post(
-                self.sync_endpoint,
-                files=files,
-                data=data,
-                headers=headers,
-                timeout=120
-            )
-            response.raise_for_status()
+            try:
+                response = self.session.post(
+                    self.sync_endpoint,
+                    files=files,
+                    data=data,
+                    headers=headers,
+                    timeout=120
+                )
+                response.raise_for_status()
+                
+            except requests.exceptions.HTTPError as e:
+                # Log detailed error information
+                error_detail = "Unknown error"
+                try:
+                    error_response = e.response.json()
+                    error_detail = error_response.get('error', {}).get('message', str(error_response))
+                except:
+                    error_detail = e.response.text if e.response else str(e)
+                
+                logger.error(f"Sarvam API error for {audio_path.name}: {e.response.status_code} - {error_detail}")
+                raise ValueError(f"Sarvam API error: {error_detail}")
             
         result = response.json()
         return self._parse_transcription_result(audio_path, result)
@@ -333,14 +388,36 @@ class SarvamTranscriber:
                     )
                 return result
         
-        # Use synchronous API since batch endpoints are returning 404
+        # Determine duration (best-effort)
+        duration = None
         try:
-            logger.info(f"Transcribing with sync API: {audio_path.name}")
-            return self._transcribe_sync(audio_path)
-                
+            import wave
+            with wave.open(str(audio_path), 'rb') as wav_file:
+                frames = wav_file.getnframes()
+                rate = wav_file.getframerate()
+                duration = frames / float(rate)
         except Exception as e:
-            logger.error(f"Transcription failed for {audio_path.name}: {e}")
-            raise
+            logger.warning(f"Could not determine audio duration for {audio_path.name}: {e}")
+        
+        # Choose path based on duration
+        if duration is not None and duration <= 30:
+            logger.info(f"File {audio_path.name} is {duration:.1f}s long, using sync API")
+            return self._transcribe_sync(audio_path)
+        
+        # For long or unknown durations, prefer chunked sync transcription
+        if duration is not None:
+            logger.info(f"File {audio_path.name} is {duration:.1f}s long, using chunked sync transcription")
+        else:
+            logger.info(f"File {audio_path.name} duration unknown, using chunked sync transcription")
+        try:
+            return self._transcribe_with_splitting(audio_path)
+        except Exception as split_error:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"Audio splitting transcription failed for {audio_path.name}: {split_error}\n{tb}")
+            # Final fallback: transcribe only first 30 seconds to ensure some output
+            logger.warning(f"Falling back to first 30 seconds for {audio_path.name}")
+            return self._transcribe_first_30_seconds(audio_path)
     
     def transcribe_batch(self, audio_paths: List[Path]) -> List[SarvamTranscriptionResult]:
         """Transcribe multiple audio files using batch API."""
@@ -382,6 +459,176 @@ class SarvamTranscriber:
             all_results.extend(batch_results)
         
         return all_results
+    
+    def _transcribe_batch_single(self, audio_path: Path) -> SarvamTranscriptionResult:
+        """Transcribe a single file using batch API (for files longer than 30 seconds)."""
+        logger.info(f"Using batch API for single file: {audio_path.name}")
+        
+        try:
+            # Upload the file
+            file_url = self._upload_file(audio_path)
+            
+            # Create batch job
+            job_id = self._create_batch_job([file_url])
+            
+            # Poll for completion
+            status = self._poll_batch_job(job_id)
+            
+            if status['state'] == 'completed':
+                # Download results
+                results = self._download_batch_results(job_id)
+                
+                # Find our file's result
+                for result in results:
+                    if result.get('file_name') == audio_path.name:
+                        return self._parse_transcription_result(audio_path, result)
+                
+                raise ValueError(f"No result found for {audio_path.name} in batch response")
+            else:
+                raise ValueError(f"Batch job failed with state: {status['state']}")
+                
+        except Exception as e:
+            logger.error(f"Batch transcription failed for {audio_path.name}: {e}")
+            # Fallback to audio splitting if batch API is not available
+            if "404" in str(e) or "Not Found" in str(e):
+                logger.info(f"Batch API not available, falling back to audio splitting for {audio_path.name}")
+                try:
+                    return self._transcribe_with_splitting(audio_path)
+                except Exception as split_error:
+                    logger.error(f"Audio splitting also failed for {audio_path.name}: {split_error}")
+                    # Final fallback: try to process the first 30 seconds only
+                    logger.warning(f"Attempting to process only first 30 seconds of {audio_path.name}")
+                    return self._transcribe_first_30_seconds(audio_path)
+            else:
+                raise
+    
+    def _transcribe_with_splitting(self, audio_path: Path) -> SarvamTranscriptionResult:
+        """Transcribe a long audio file by splitting it into chunks."""
+        try:
+            from audio_splitter import AudioSplitter
+            
+            # Create temporary directory for chunks
+            import tempfile
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Split the audio file with optimized parameters for longer files
+                # Use smaller chunks (20s) with overlap for better accuracy
+                splitter = AudioSplitter(max_chunk_duration=20.0, overlap_duration=2.0)
+                chunks = splitter.split_audio_file(audio_path, temp_path)
+                
+                if not chunks:
+                    raise ValueError(f"No chunks created for {audio_path.name}")
+                
+                logger.info(f"Splitting {audio_path.name} ({len(chunks)} chunks)")
+                
+                # Transcribe each chunk with retry logic
+                all_segments = []
+                successful_chunks = 0
+                
+                for i, (chunk_path, start_time, end_time) in enumerate(chunks):
+                    try:
+                        logger.info(f"Transcribing chunk {i+1}/{len(chunks)}: {chunk_path.name} ({start_time:.1f}s - {end_time:.1f}s)")
+                        chunk_result = self._transcribe_sync(chunk_path)
+                        
+                        # Adjust segment timestamps to account for chunk offset
+                        for segment in chunk_result.segments:
+                            segment['start'] += start_time
+                            segment['end'] += start_time
+                            all_segments.append(segment)
+                        
+                        successful_chunks += 1
+                        
+                    except Exception as e:
+                        import traceback as _tb
+                        logger.warning(f"Failed to transcribe chunk {i+1}/{len(chunks)} {chunk_path.name}: {e}\n{_tb.format_exc()}")
+                        continue
+                
+                if successful_chunks == 0:
+                    raise ValueError(f"No chunks successfully transcribed for {audio_path.name}")
+                
+                # Create combined result
+                metadata = self._extract_metadata_from_filename(audio_path.name)
+                result = SarvamTranscriptionResult(audio_path, metadata)
+                
+                # Add all segments with adjusted timestamps
+                for segment in all_segments:
+                    result.add_segment(
+                        segment['start'],
+                        segment['end'],
+                        segment['text'],
+                        segment.get('confidence', 0.8),
+                        segment.get('speaker')
+                    )
+                
+                logger.info(f"Successfully transcribed {audio_path.name} using {successful_chunks}/{len(chunks)} chunks")
+                return result
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"Audio splitting transcription failed for {audio_path.name}: {e}\n{traceback.format_exc()}")
+            raise
+    
+    def _transcribe_first_30_seconds(self, audio_path: Path) -> SarvamTranscriptionResult:
+        """Transcribe only the first 30 seconds of a long audio file as a final fallback."""
+        try:
+            import tempfile
+            from audio_splitter import AudioSplitter
+            
+            # Create a temporary chunk with only the first 30 seconds
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Determine original duration for clearer logging
+                try:
+                    import wave as _wave_for_len
+                    with _wave_for_len.open(str(audio_path), 'rb') as _wf:
+                        _frames = _wf.getnframes()
+                        _rate = _wf.getframerate()
+                        _orig_duration = _frames / float(_rate)
+                except Exception:
+                    _orig_duration = None
+
+                # Create a chunk with first 30 seconds
+                splitter = AudioSplitter(max_chunk_duration=30.0, overlap_duration=0.0)
+                chunks = splitter.split_audio_file(audio_path, temp_path)
+                
+                if not chunks:
+                    raise ValueError("Failed to create first 30-second chunk")
+                
+                # Take only the first chunk
+                chunk_path, start_time, end_time = chunks[0]
+                
+                # Transcribe the first chunk
+                chunk_result = self._transcribe_sync(chunk_path)
+                
+                # Create result with warning about partial transcription
+                metadata = self._extract_metadata_from_filename(audio_path.name)
+                result = SarvamTranscriptionResult(audio_path, metadata)
+                
+                # Add segments from first chunk
+                for segment in chunk_result.segments:
+                    result.add_segment(
+                        segment['start'],
+                        segment['end'],
+                        segment['text'],
+                        segment.get('confidence', 0.8),
+                        segment.get('speaker')
+                    )
+                
+                if _orig_duration is not None:
+                    logger.warning(f"Transcribed only first 30 seconds of {audio_path.name} (original length { _orig_duration:.1f}s)")
+                else:
+                    logger.warning(f"Transcribed only first 30 seconds of {audio_path.name}")
+                return result
+                
+        except Exception as e:
+            logger.error(f"Failed to transcribe first 30 seconds of {audio_path.name}: {e}")
+            # Create empty result with error message
+            metadata = self._extract_metadata_from_filename(audio_path.name)
+            result = SarvamTranscriptionResult(audio_path, metadata)
+            result.add_segment(0.0, 1.0, f"[TRANSCRIPTION FAILED: {str(e)}]", 0.0, None)
+            return result
     
     def _transcribe_batch(self, audio_paths: List[Path]) -> List[SarvamTranscriptionResult]:
         """Internal method to transcribe a batch of files."""

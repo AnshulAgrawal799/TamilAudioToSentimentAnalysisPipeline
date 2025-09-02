@@ -94,3 +94,26 @@ quality_thresholds:
   min_segment_confidence: 0.5  # Minimum confidence for segments
   min_translation_quality: 0.7  # Minimum quality for translations
   max_segment_length: 200  # Maximum characters per segment
+
+# Confidence weights for overall confidence calculation
+confidence_weights:
+  asr: 0.35
+  translation: 0.20
+  role: 0.15
+  intent: 0.15
+  product: 0.15
+
+# Human review thresholds
+human_review_thresholds:
+  asr_confidence: 0.80
+  translation_confidence: 0.75
+  product_confidence: 0.75
+  negative_sentiment_threshold: -0.25
+  role_confidence_threshold: 0.6
+
+# Utterance segmentation settings
+utterance_segmentation:
+  min_duration_ms: 500  # Minimum utterance duration
+  max_duration_ms: 30000  # Maximum utterance duration
+  pause_threshold_ms: 1000  # Pause threshold for splitting utterances
+  merge_short_utterances: true  # Merge very short back-to-back utterances

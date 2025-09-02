@@ -47,32 +47,48 @@ class Segment:
         self.seller_id = kwargs.get('seller_id', 'UNKNOWN_SELLER')
         self.stop_id = kwargs.get('stop_id', 'UNKNOWN_STOP')
         self.segment_id = kwargs.get('segment_id', f"SEG{str(uuid.uuid4())[:8]}")
+        self.merged_block_id = kwargs.get('merged_block_id', None)  # For backward compatibility
+        self.utterance_index = kwargs.get('utterance_index', 0)  # 0-based index per audio file
         self.timestamp = kwargs.get('timestamp', '1970-01-01T00:00:00Z')
         self.speaker_role = kwargs.get('speaker_role', 'other')
+        self.role_confidence = kwargs.get('role_confidence', 0.5)
         self.textTamil = kwargs.get('textTamil', '')  # Tamil text in Unicode
         self.textEnglish = kwargs.get('textEnglish', '')  # English text
+        self.is_translated = kwargs.get('is_translated', False)
+        self.translation_confidence = kwargs.get('translation_confidence', 0.5)
         self.intent = kwargs.get('intent', 'other')
+        self.intent_confidence = kwargs.get('intent_confidence', 0.5)
         self.sentiment_score = kwargs.get('sentiment_score', 0.0)
         self.sentiment_label = kwargs.get('sentiment_label', 'neutral')
         self.emotion = kwargs.get('emotion', 'neutral')
-        self.confidence = kwargs.get('confidence', 0.5)
+        self.confidence = kwargs.get('confidence', 0.5)  # Overall confidence
         self.audio_file_id = kwargs.get('audio_file_id', 'UNKNOWN_AUDIO')
         self.start_ms = kwargs.get('start_ms', 0)
         self.end_ms = kwargs.get('end_ms', 0)
         self.duration_ms = kwargs.get('duration_ms', 0)
-        # New fields for better tracking
-        self.translation_confidence = kwargs.get('translation_confidence', 0.5)
-        self.is_translated = kwargs.get('is_translated', False)
-        # Extended fields per new spec
-        self.role_confidence = kwargs.get('role_confidence', 0.5)
-        self.products = kwargs.get('products', [])
+        self.asr_confidence = kwargs.get('asr_confidence', 0.8)
+        
+        # Product detection fields
+        self.products = kwargs.get('products', [])  # List of product objects with spans
+        self.product_intents = kwargs.get('product_intents', {})  # sku_id -> intent
+        self.product_sentiments = kwargs.get('product_sentiments', {})  # sku_id -> sentiment object
+        self.product_intent_confidences = kwargs.get('product_intent_confidences', {})  # sku_id -> confidence
+        
+        # Business logic fields
         self.action_required = kwargs.get('action_required', False)
         self.escalation_needed = kwargs.get('escalation_needed', False)
         self.churn_risk = kwargs.get('churn_risk', 'low')  # low/medium/high
         self.business_opportunity = kwargs.get('business_opportunity', False)
-        # ASR confidence and human review flag
-        self.asr_confidence = kwargs.get('asr_confidence', 0.8)
         self.needs_human_review = kwargs.get('needs_human_review', False)
+        
+        # Pipeline metadata
+        self.model_versions = kwargs.get('model_versions', {
+            'asr': 'asr-1.2.0',
+            'translation': 'trans-0.9.4', 
+            'ner': 'ner-0.3.1',
+            'absa': 'absa-0.2.7'
+        })
+        self.pipeline_run_id = kwargs.get('pipeline_run_id', f"run-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4]}")
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -82,11 +98,17 @@ class Segment:
             'seller_id': self.seller_id,
             'stop_id': self.stop_id,
             'segment_id': self.segment_id,
+            'merged_block_id': self.merged_block_id,
+            'utterance_index': self.utterance_index,
             'timestamp': self.timestamp,
             'speaker_role': self.speaker_role,
+            'role_confidence': self.role_confidence,
             'textTamil': self.textTamil,
             'textEnglish': self.textEnglish,
+            'is_translated': self.is_translated,
+            'translation_confidence': self.translation_confidence,
             'intent': self.intent,
+            'intent_confidence': self.intent_confidence,
             'sentiment_score': self.sentiment_score,
             'sentiment_label': self.sentiment_label,
             'emotion': self.emotion,
@@ -95,28 +117,54 @@ class Segment:
             'start_ms': self.start_ms,
             'end_ms': self.end_ms,
             'duration_ms': self.duration_ms,
-            'translation_confidence': self.translation_confidence,
-            'is_translated': self.is_translated,
-            'role_confidence': self.role_confidence,
+            'asr_confidence': self.asr_confidence,
             'products': self.products,
+            'product_intents': self.product_intents,
+            'product_sentiments': self.product_sentiments,
             'action_required': self.action_required,
             'escalation_needed': self.escalation_needed,
             'churn_risk': self.churn_risk,
             'business_opportunity': self.business_opportunity,
-            'asr_confidence': self.asr_confidence,
-            'needs_human_review': needs_review
+            'needs_human_review': needs_review,
+            'product_intent_confidences': self.product_intent_confidences,
+            'model_versions': self.model_versions,
+            'pipeline_run_id': self.pipeline_run_id
         }
 
     def _compute_needs_human_review(self) -> bool:
         """Derive whether this segment needs human review based on configured rules."""
         try:
-            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.65)
-        except Exception:
-            asr_low = False
-        translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.65)
-        risk_condition = (self.sentiment_label == 'negative' and self.churn_risk == 'high' and (self.role_confidence or 0.0) >= 0.5)
-        self.needs_human_review = bool(asr_low or translation_low or risk_condition)
-        return self.needs_human_review
+            # ASR confidence threshold (increased for better quality)
+            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.85)
+            
+            # Translation confidence threshold (increased for better quality)
+            translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.80)
+            
+            # Product confidence threshold (any product below threshold)
+            product_low = False
+            for product in self.products:
+                if isinstance(product, dict) and product.get('product_confidence', 1.0) < 0.75:
+                    product_low = True
+                    break
+            
+            # High churn risk condition
+            churn_risk_condition = (self.sentiment_score <= -0.25 and self.role_confidence >= 0.6)
+            
+            # High negative sentiment with role confidence
+            negative_sentiment_condition = (self.sentiment_score <= -0.25 and self.role_confidence >= 0.6)
+            
+            self.needs_human_review = bool(
+                asr_low or 
+                translation_low or 
+                product_low or 
+                churn_risk_condition or
+                negative_sentiment_condition
+            )
+            return self.needs_human_review
+            
+        except Exception as e:
+            logger.warning(f"Error computing human review flag: {e}")
+            return True  # Default to human review on error
 
     def to_json(self) -> str:
         """Serialize this segment to a JSON string."""
@@ -135,6 +183,9 @@ class NLUAnalyzer:
         self.placeholders = config.get('placeholders', {})
         self.confidence_threshold = config.get('confidence_threshold', 0.3)
         self.min_segment_words = config.get('min_segment_words', 4)
+        
+        # Translation confidence tracking
+        self._last_translation_confidence = 0.8  # Default confidence
         
         # Initialize heuristics
         self._init_heuristics()
@@ -338,6 +389,8 @@ class NLUAnalyzer:
                     translation = translate_client.translate(tamil_text, source_language='ta', target_language='en')
                     if translation and translation['translatedText']:
                         logger.debug(f"Google Cloud Translate: '{tamil_text[:50]}...' -> '{translation['translatedText'][:50]}...'")
+                        # Set high confidence for Google Cloud Translate
+                        self._last_translation_confidence = 0.9
                         return self._post_process_translation(translation['translatedText'])
                 
                 # Fallback to googletrans
@@ -350,6 +403,8 @@ class NLUAnalyzer:
                         translation = translator.translate(tamil_text, src='ta', dest='en')
                         if translation and translation.text:
                             logger.debug(f"googletrans fallback: '{tamil_text[:50]}...' -> '{translation.text[:50]}...'")
+                            # Set medium confidence for googletrans
+                            self._last_translation_confidence = 0.7
                             return self._post_process_translation(translation.text)
                     else:
                         logger.debug(f"Text not detected as Tamil: {detected.lang}")
@@ -358,6 +413,7 @@ class NLUAnalyzer:
                 logger.warning(f"Translation failed: {e}. Using fallback method.")
         
         # Fallback to improved dictionary-based translation
+        self._last_translation_confidence = 0.5  # Lower confidence for fallback
         return self._fallback_translate_to_english(tamil_text)
     
     def _post_process_translation(self, english_text: str) -> str:
@@ -506,11 +562,42 @@ class NLUAnalyzer:
             
             # Create segment object with improved fields
             english_translation = self._translate_to_english(cleaned_text)
+            translation_confidence = 0.8
+            is_translated = False
+            
+            # Determine translation quality and confidence
+            if english_translation:
+                # Check if translation is actually English (not just transliteration)
+                english_words = english_translation.split()
+                if len(english_words) >= 2:  # At least 2 words for a real translation
+                    # Check if translation contains actual English words
+                    english_word_count = sum(1 for word in english_words 
+                                           if re.match(r'^[a-zA-Z]+$', word) and len(word) > 2)
+                    if english_word_count >= len(english_words) * 0.7:  # 70% should be English words
+                        is_translated = True
+                        translation_confidence = 0.85
+                    else:
+                        # Likely transliteration, not real translation
+                        translation_confidence = self._last_translation_confidence * 0.6  # Reduce confidence for transliteration
+                        is_translated = False
+                else:
+                    # Too short to be a real translation
+                    translation_confidence = 0.3
+                    is_translated = False
+            else:
+                translation_confidence = 0.0
+                is_translated = False
+            
             # Enrich too-short translations for requests
             if english_translation and len(english_translation.split()) < self.config.get('translation', {}).get('min_words_english', 4):
                 enriched = self._enrich_short_translation(cleaned_text, english_translation)
                 if enriched:
                     english_translation = enriched
+                    # Re-evaluate translation quality after enrichment
+                    if len(enriched.split()) >= 3:
+                        is_translated = True
+                        translation_confidence = 0.8
+            
             seg = Segment(
                 seller_id=seller_id,
                 stop_id=stop_id,
@@ -522,8 +609,8 @@ class NLUAnalyzer:
                 duration_ms=duration_ms,
                 textTamil=cleaned_text,  # Clean Unicode Tamil text
                 textEnglish=english_translation,  # Improved English translation
-                is_translated=bool(english_translation),
-                translation_confidence=0.8 if english_translation else 0.3,
+                is_translated=is_translated,
+                translation_confidence=translation_confidence,
                 asr_confidence=segment.get('confidence', 0.8)
             )
             
@@ -547,6 +634,10 @@ class NLUAnalyzer:
             self._analyze_intent(seg)
             self._analyze_sentiment(seg)
             self._analyze_emotion(seg)
+            
+            # Detect products and product-specific analysis
+            self._detect_products(seg)
+            
             self._set_confidence(seg)
             
             # Validate and fix logical contradictions
@@ -803,65 +894,54 @@ class NLUAnalyzer:
             segment.emotion = 'neutral'
     
     def _set_confidence(self, segment: Segment):
-        """Set confidence score based on analysis quality."""
-        # Base confidence
-        base_confidence = 0.7
-        
-        # Adjust based on text length (longer text = higher confidence)
-        length_factor = min(1.0, len(segment.textTamil.split()) / 20.0)
-        
-        # Adjust based on pattern matches
-        pattern_matches = 0
-        if segment.speaker_role != 'other':
-            pattern_matches += 1
-        if segment.intent != 'other':
-            pattern_matches += 1
-        if segment.emotion != 'neutral':
-            pattern_matches += 1
-        
-        pattern_factor = pattern_matches / 3.0
+        """Set overall confidence based on various factors."""
+        # Base confidence from ASR
+        base_confidence = segment.asr_confidence or 0.8
         
         # Adjust based on translation quality
-        translation_quality = 0.5  # Base translation quality
-        min_words_en = self.config.get('translation', {}).get('min_words_english', 4)
-        if segment.textEnglish and len(segment.textEnglish.split()) >= min_words_en:
-            translation_quality = 0.8
+        if segment.is_translated:
+            translation_factor = segment.translation_confidence or 0.8
         else:
-            # Penalize low completeness translations
-            penalty = self.config.get('translation', {}).get('low_confidence_penalty', 0.2)
-            segment.translation_confidence = max(0.0, segment.translation_confidence - penalty)
+            translation_factor = 0.6  # Lower confidence for untranslated segments
         
-        # Calculate final confidence
-        confidence = base_confidence + (length_factor * 0.15) + (pattern_factor * 0.1) + (translation_quality * 0.05)
-        confidence = min(0.95, max(0.3, confidence))  # Clamp between 0.3 and 0.95
+        # Adjust based on speaker role confidence
+        role_factor = segment.role_confidence or 0.5
         
-        segment.confidence = round(confidence, 2)
+        # Adjust based on intent confidence
+        intent_factor = segment.intent_confidence or 0.7
+        
+        # Adjust based on product detection confidence
+        product_factor = 1.0
+        if segment.products:
+            product_confidences = [p.get('product_confidence', 0.8) for p in segment.products]
+            product_factor = sum(product_confidences) / len(product_confidences)
+        
+        # Calculate weighted average with configurable weights
+        weights = self.config.get('confidence_weights', {
+            'asr': 0.35,
+            'translation': 0.20,
+            'role': 0.15,
+            'intent': 0.15,
+            'product': 0.15
+        })
+        
+        confidence = (
+            base_confidence * weights['asr'] +
+            translation_factor * weights['translation'] +
+            role_factor * weights['role'] +
+            intent_factor * weights['intent'] +
+            product_factor * weights['product']
+        )
+        
+        segment.confidence = min(1.0, max(0.0, confidence))
 
         # Derive business flags after we have sentiment/intent
         self._set_business_flags(segment)
 
-    def _extract_products(self, segment: Segment) -> List[str]:
-        """Extract product entities for SKU analytics."""
-        text = (segment.textTamil + ' ' + (segment.textEnglish or '')).lower()
-        products = []
-        if any(term in text for term in ['தக்காலி', 'tomato', 'tomatoes']):
-            products.append('tomato')
-        if any(term in text for term in ['கொத்தமல்லி', 'coriander']):
-            products.append('coriander')
-        if any(term in text for term in ['கருவப்புல்', 'curry leaves', 'curry_leaf', 'curryleaf']):
-            products.append('curry_leaf')
-        if any(term in text for term in ['காலான்', 'gallon']):
-            products.append('gallon')
-        if any(term in text for term in ['தேங்காய்', 'coconut', 'தனமு']):
-            products.append('coconut')
-        # Deduplicate
-        return sorted(list(dict.fromkeys(products)))
+
 
     def _set_business_flags(self, segment: Segment) -> None:
         """Set action flags and churn/opportunity heuristics."""
-        # Entities
-        segment.products = self._extract_products(segment)
-
         # Action flags
         segment.action_required = segment.intent in ['complaint', 'purchase_negative']
         segment.escalation_needed = segment.action_required and (segment.sentiment_label == 'negative')
@@ -876,6 +956,220 @@ class NLUAnalyzer:
 
         # Opportunity flag
         segment.business_opportunity = segment.intent in ['product_praise', 'purchase_request', 'purchase_positive']
+    
+    def _detect_products(self, segment: Segment):
+        """Detect products mentioned in the text using rule-based and ML approaches."""
+        tamil_text = segment.textTamil.lower()
+        english_text = segment.textEnglish.lower() if segment.textEnglish else ""
+        
+        # Product dictionary with SKU mapping
+        product_dict = {
+            'tomato': {
+                'tamil_names': ['தக்காலி', 'தக்காளி', 'தக்காளி'],
+                'sku_id': 'SKU-0001',
+                'english_names': ['tomato', 'tomatoes']
+            },
+            'coriander': {
+                'tamil_names': ['கொத்தமல்லி', 'கொத்தமல்லி கட்டு'],
+                'sku_id': 'SKU-0002', 
+                'english_names': ['coriander', 'cilantro']
+            },
+            'curry_leaves': {
+                'tamil_names': ['கருவப்புல்', 'கருவேப்பிலை'],
+                'sku_id': 'SKU-0003',
+                'english_names': ['curry leaves', 'curry leaf']
+            },
+            'coconut': {
+                'tamil_names': ['தனமு', 'தேங்காய்'],
+                'sku_id': 'SKU-0004',
+                'english_names': ['coconut', 'coconuts']
+            },
+            'gallon': {
+                'tamil_names': ['காலான்'],
+                'sku_id': 'SKU-0005',
+                'english_names': ['gallon', 'gallons']
+            },
+            'onion': {
+                'tamil_names': ['வெங்காயம்'],
+                'sku_id': 'SKU-0006',
+                'english_names': ['onion', 'onions']
+            },
+            'potato': {
+                'tamil_names': ['ஆலூரடி', 'உருளைக்கிழங்கு'],
+                'sku_id': 'SKU-0007',
+                'english_names': ['potato', 'potatoes']
+            }
+        }
+        
+        detected_products = []
+        product_intents = {}
+        product_sentiments = {}
+        product_intent_confidences = {}
+        
+        for product_name, product_info in product_dict.items():
+            # Check Tamil text
+            tamil_found = any(name in tamil_text for name in product_info['tamil_names'])
+            # Check English text
+            english_found = any(name in english_text for name in product_info['english_names'])
+            
+            if tamil_found or english_found:
+                # Find text spans
+                tamil_span = self._find_text_span(tamil_text, product_info['tamil_names'])
+                english_span = self._find_text_span(english_text, product_info['english_names'])
+                
+                # Calculate product confidence based on context
+                product_confidence = self._calculate_product_confidence(
+                    tamil_text, english_text, product_name, product_info
+                )
+                
+                # Detect product-specific intent
+                product_intent, intent_confidence = self._detect_product_intent(
+                    tamil_text, english_text, product_name, segment.intent
+                )
+                
+                # Detect product-specific sentiment
+                product_sentiment = self._detect_product_sentiment(
+                    tamil_text, english_text, product_name, segment.sentiment_score
+                )
+                
+                product_obj = {
+                    'product_name': product_name,
+                    'sku_id': product_info['sku_id'],
+                    'product_confidence': product_confidence,
+                    'text_span_tamil': tamil_span,
+                    'text_span_english': english_span
+                }
+                
+                detected_products.append(product_obj)
+                product_intents[product_info['sku_id']] = product_intent
+                product_sentiments[product_info['sku_id']] = product_sentiment
+                product_intent_confidences[product_info['sku_id']] = intent_confidence
+        
+        segment.products = detected_products
+        segment.product_intents = product_intents
+        segment.product_sentiments = product_sentiments
+        segment.product_intent_confidences = product_intent_confidences
+    
+    def _find_text_span(self, text: str, product_names: list) -> dict:
+        """Find character span of product mention in text."""
+        if not text:
+            return {'start_char': 0, 'end_char': 0}
+        
+        for name in product_names:
+            if name in text:
+                start_char = text.find(name)
+                end_char = start_char + len(name)
+                return {'start_char': start_char, 'end_char': end_char}
+        
+        return {'start_char': 0, 'end_char': 0}
+    
+    def _calculate_product_confidence(self, tamil_text: str, english_text: str, 
+                                    product_name: str, product_info: dict) -> float:
+        """Calculate confidence for product detection."""
+        base_confidence = 0.8
+        
+        # Boost confidence if found in both languages
+        if any(name in tamil_text for name in product_info['tamil_names']) and \
+           any(name in english_text for name in product_info['english_names']):
+            base_confidence += 0.1
+        
+        # Boost confidence if product is mentioned with quantity/request words
+        quantity_words = ['கொஞ்சம்', 'ஒரு', 'some', 'one', 'a', 'the']
+        request_words = ['கொடுங்கள்', 'கொடு', 'give', 'please', 'need', 'want']
+        
+        has_quantity = any(word in tamil_text or word in english_text for word in quantity_words)
+        has_request = any(word in tamil_text or word in english_text for word in request_words)
+        
+        if has_quantity:
+            base_confidence += 0.05
+        if has_request:
+            base_confidence += 0.05
+        
+        return min(1.0, base_confidence)
+    
+    def _detect_product_intent(self, tamil_text: str, english_text: str, 
+                              product_name: str, segment_intent: str) -> tuple:
+        """Detect product-specific intent."""
+        # Product-specific intent patterns
+        product_intent_patterns = {
+            'purchase_request': [
+                'கொடுங்கள்', 'கொடு', 'கொடுக்கலாம்', 'கிடைக்குமா', 'எவ்வளவு',
+                'give', 'please', 'can you', 'how much', 'available'
+            ],
+            'product_praise': [
+                'நல்லா', 'சிறந்த', 'அருமை', 'நன்று', 'தரமான',
+                'good', 'great', 'excellent', 'quality', 'fresh'
+            ],
+            'purchase_positive': [
+                'வாங்குகிறேன்', 'வாங்குவோம்', 'எடுத்துக்கொள்கிறேன்',
+                'buy', 'will buy', 'take', 'purchase'
+            ],
+            'purchase_negative': [
+                'வாங்காமல', 'வாங்க மாட்டோம்', 'இல்லை',
+                'won\'t buy', 'not buying', 'no'
+            ]
+        }
+        
+        # Check patterns in both languages
+        intent_scores = {}
+        for intent, patterns in product_intent_patterns.items():
+            score = sum(1 for pattern in patterns if pattern in tamil_text)
+            score += sum(1 for pattern in patterns if pattern in english_text)
+            intent_scores[intent] = score
+        
+        # Find best intent
+        if intent_scores:
+            best_intent = max(intent_scores.items(), key=lambda x: x[1])
+            if best_intent[1] > 0:
+                product_intent = best_intent[0]
+                confidence = min(0.95, 0.5 + 0.2 * best_intent[1])
+            else:
+                # Fall back to segment intent
+                product_intent = segment_intent
+                confidence = 0.5
+        else:
+            product_intent = segment_intent
+            confidence = 0.5
+        
+        return product_intent, confidence
+    
+    def _detect_product_sentiment(self, tamil_text: str, english_text: str,
+                                 product_name: str, segment_sentiment: float) -> dict:
+        """Detect product-specific sentiment."""
+        # Product-specific sentiment patterns
+        positive_patterns = [
+            'நல்லா', 'சிறந்த', 'அருமை', 'நன்று', 'தரமான', 'புதிய',
+            'good', 'great', 'excellent', 'quality', 'fresh', 'best'
+        ]
+        
+        negative_patterns = [
+            'மோசம்', 'மோசமான', 'தவறு', 'பிரச்சினை', 'தரம் குறைவு',
+            'bad', 'poor', 'terrible', 'wrong', 'problem', 'low quality'
+        ]
+        
+        # Count positive and negative mentions
+        positive_count = sum(1 for pattern in positive_patterns 
+                           if pattern in tamil_text or pattern in english_text)
+        negative_count = sum(1 for pattern in negative_patterns 
+                           if pattern in tamil_text or pattern in english_text)
+        
+        # Calculate product-specific sentiment
+        if positive_count > negative_count:
+            sentiment_score = min(1.0, 0.3 + 0.2 * positive_count)
+            sentiment_label = 'positive'
+        elif negative_count > positive_count:
+            sentiment_score = max(-1.0, -0.3 - 0.2 * negative_count)
+            sentiment_label = 'negative'
+        else:
+            # Use segment sentiment as baseline
+            sentiment_score = segment_sentiment
+            sentiment_label = 'neutral' if abs(sentiment_score) < 0.15 else \
+                             ('positive' if sentiment_score > 0 else 'negative')
+        
+        return {
+            'sentiment_score': sentiment_score,
+            'sentiment_label': sentiment_label
+        }
     
     def _validate_and_fix_contradictions(self, segment: Segment):
         """Validate and fix logical contradictions in the analysis."""

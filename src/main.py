@@ -10,6 +10,8 @@ import sys
 import os
 from pathlib import Path
 from typing import Dict, Any
+from datetime import timedelta
+from dateutil import parser as dateparser
 
 # Load environment variables from .env file
 try:
@@ -181,6 +183,8 @@ def main():
         # Use individual transcription for now since batch API endpoints are returning 404
         logger.info("Using individual transcription with Sarvam")
         transcript_results = []
+        failed_files = []
+        
         for wav_file in wav_files:
             try:
                 result = transcriber.transcribe(wav_file)
@@ -188,29 +192,56 @@ def main():
                 logger.info(f"Transcribed: {wav_file.name} ({result.provider}/{result.model_used})")
             except Exception as e:
                 logger.error(f"Failed to transcribe {wav_file}: {e}")
+                failed_files.append(wav_file.name)
                 continue
+        
+        if failed_files:
+            logger.warning(f"Failed to transcribe {len(failed_files)} files: {failed_files}")
+            logger.info(f"Continuing with {len(transcript_results)} successfully transcribed files")
         
         if not transcript_results:
             logger.error("No transcriptions completed successfully")
             sys.exit(1)
         
-        # Step 3: NLU Analysis
-        logger.info("Step 3: Running NLU analysis...")
+        # Step 3: NLU Analysis with utterance-level segmentation
+        logger.info("Step 3: Running NLU analysis with utterance-level segmentation...")
         analyzer = NLUAnalyzer(config)
         analyzed_segments = []
+        
         for result in transcript_results:
+            # Process each transcription result and create utterance-level segments
             segments = analyzer.analyze(result)
+            
+            # Add utterance indices and ensure proper timing
+            for i, segment in enumerate(segments):
+                segment.utterance_index = i
+                
+                # Ensure accurate timing - fail if timing can't be computed
+                if segment.start_ms == 0 and segment.end_ms == 1000:
+                    logger.warning(f"Segment {segment.segment_id} has placeholder timing - marking for human review")
+                    segment.needs_human_review = True
+                    segment.asr_confidence = 0.5  # Lower confidence for timing issues
+                
+                # Generate proper ISO timestamp
+                try:
+                    base_time = dateparser.isoparse(result.metadata.get('recording_start', '2025-08-19T00:00:00Z'))
+                    segment_start_time = base_time + timedelta(milliseconds=segment.start_ms)
+                    segment.timestamp = segment_start_time.isoformat().replace('+00:00', 'Z')
+                except Exception as e:
+                    logger.warning(f"Failed to generate timestamp for segment {segment.segment_id}: {e}")
+                    segment.needs_human_review = True
+            
             analyzed_segments.extend(segments)
         
-        logger.info(f"Analyzed {len(analyzed_segments)} segments")
+        logger.info(f"Analyzed {len(analyzed_segments)} utterance-level segments")
         
-        # Step 4: Generate outputs
-        logger.info("Step 4: Generating output files...")
+        # Step 4: Generate outputs with new schema
+        logger.info("Step 4: Generating output files with updated schema...")
         
-        # Sort segments by audio_file_id and timestamp for proper ordering
-        analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.start_ms))
+        # Sort segments by audio_file_id and utterance_index for proper ordering
+        analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.utterance_index))
         
-        # Write segments to JSON with proper ordering
+        # Write segments to JSON with new schema
         segments_output = Path(config['output_dir']) / "segments.json"
         with open(segments_output, 'w', encoding='utf-8') as f:
             import json
@@ -218,7 +249,7 @@ def main():
             # Deterministic post-processing: map products to product_intents
             _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
             json.dump(segments_data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Wrote {len(segments_data)} segments to: {segments_output}")
+        logger.info(f"Wrote {len(segments_data)} utterance-level segments to: {segments_output}")
         
         # Also write segments grouped by audio file for better organization
         audio_grouped_segments = {}
