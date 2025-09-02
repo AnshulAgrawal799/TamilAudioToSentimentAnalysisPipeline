@@ -589,15 +589,9 @@ class SarvamTranscriber:
                 except Exception:
                     _orig_duration = None
 
-                # Create a chunk with first 30 seconds
+                # Create exactly one chunk for the first 30 seconds
                 splitter = AudioSplitter(max_chunk_duration=30.0, overlap_duration=0.0)
-                chunks = splitter.split_audio_file(audio_path, temp_path)
-                
-                if not chunks:
-                    raise ValueError("Failed to create first 30-second chunk")
-                
-                # Take only the first chunk
-                chunk_path, start_time, end_time = chunks[0]
+                chunk_path, start_time, end_time = splitter.create_single_chunk(audio_path, temp_path, 0.0, 30.0)
                 
                 # Transcribe the first chunk
                 chunk_result = self._transcribe_sync(chunk_path)

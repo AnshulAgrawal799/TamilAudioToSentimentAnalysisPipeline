@@ -39,8 +39,9 @@ class AudioSplitter:
             max_chunk_duration: Maximum duration of each chunk in seconds (default: 25s)
             overlap_duration: Overlap between chunks in seconds (default: 1s)
         """
-        self.max_chunk_duration = max_chunk_duration
-        self.overlap_duration = overlap_duration
+        # Sanitize inputs
+        self.max_chunk_duration = max(0.1, float(max_chunk_duration))
+        self.overlap_duration = max(0.0, float(overlap_duration))
     
     def split_audio_file(self, audio_path: Path, output_dir: Path = None) -> List[Tuple[Path, float, float]]:
         """
@@ -97,15 +98,21 @@ class AudioSplitter:
         """Calculate chunk boundaries with overlap."""
         chunks = []
         start_time = 0.0
+        # Ensure overlap is strictly less than chunk duration to guarantee progress
+        effective_overlap = min(self.overlap_duration, max(self.max_chunk_duration - 0.01, 0.0))
+
+        max_chunks = int(total_duration / max(self.max_chunk_duration - effective_overlap, 0.01)) + 5
+        iterations = 0
         
-        while start_time < total_duration:
+        while start_time < total_duration and iterations < max_chunks:
             end_time = min(start_time + self.max_chunk_duration, total_duration)
             chunks.append((start_time, end_time))
-            start_time = end_time - self.overlap_duration
-            
-            # Avoid infinite loop for very short overlaps
-            if start_time >= total_duration:
-                break
+            next_start = end_time - effective_overlap
+            if next_start <= start_time:
+                # Force progress
+                next_start = start_time + self.max_chunk_duration
+            start_time = next_start
+            iterations += 1
         
         return chunks
     
@@ -136,6 +143,14 @@ class AudioSplitter:
                 shutil.copy2(audio_path, chunk_path)
         
         return chunk_path
+
+    def create_single_chunk(self, audio_path: Path, output_dir: Path, start_time: float, end_time: float) -> Tuple[Path, float, float]:
+        """Create exactly one chunk without enumerating all boundaries."""
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+        chunk_path = self._create_chunk(audio_path, output_dir, 0, start_time, end_time)
+        logger.info(f"Created single chunk: {chunk_path.name} ({start_time:.1f}s - {end_time:.1f}s)")
+        return (chunk_path, start_time, end_time)
     
     def _create_chunk_pydub(self, audio_path: Path, chunk_path: Path, 
                            start_time: float, end_time: float):
