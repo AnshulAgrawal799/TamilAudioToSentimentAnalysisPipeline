@@ -15,20 +15,27 @@ from dateutil import parser as dateparser
 
 logger = logging.getLogger(__name__)
 
-# Import proper translation libraries
+# Import proper translation libraries (load both independently if available)
+HAVE_CLOUD_TRANSLATE = False
+HAVE_GOOGLETRANS = False
+translate = None
+Translator = None
+
 try:
-    from google.cloud import translate_v2 as translate
-    TRANSLATION_AVAILABLE = True
+    from google.cloud import translate_v2 as translate  # type: ignore
+    HAVE_CLOUD_TRANSLATE = True
     logger.info("Google Cloud Translate API available")
-except ImportError:
-    try:
-        # Fallback to googletrans if Google Cloud not available
-        from googletrans import Translator
-        TRANSLATION_AVAILABLE = True
-        logger.warning("Using googletrans fallback. Consider setting up Google Cloud Translate for better quality.")
-    except ImportError:
-        TRANSLATION_AVAILABLE = False
-        logger.warning("No translation library available. Using fallback translation.")
+except Exception:
+    HAVE_CLOUD_TRANSLATE = False
+
+try:
+    from googletrans import Translator  # type: ignore
+    HAVE_GOOGLETRANS = True
+    logger.info("googletrans available (fallback translator)")
+except Exception:
+    HAVE_GOOGLETRANS = False
+    if not HAVE_CLOUD_TRANSLATE:
+        logger.warning("No MT library available (cloud/googletrans missing). Will use dictionary fallback.")
 
 # Import language detection
 try:
@@ -56,6 +63,7 @@ class Segment:
         self.textEnglish = kwargs.get('textEnglish', '')  # English text
         self.is_translated = kwargs.get('is_translated', False)
         self.translation_confidence = kwargs.get('translation_confidence', 0.5)
+        self.translation_source = kwargs.get('translation_source', 'none')  # none|google_cloud|googletrans|fallback_dict|heuristic_template
         self.intent = kwargs.get('intent', 'other')
         self.intent_confidence = kwargs.get('intent_confidence', 0.5)
         self.sentiment_score = kwargs.get('sentiment_score', 0.0)
@@ -110,6 +118,7 @@ class Segment:
             'textEnglish': self.textEnglish,
             'is_translated': self.is_translated,
             'translation_confidence': self.translation_confidence,
+            'translation_source': self.translation_source,
             'intent': self.intent,
             'intent_confidence': self.intent_confidence,
             'sentiment_score': self.sentiment_score,
@@ -191,6 +200,7 @@ class NLUAnalyzer:
         
         # Translation confidence tracking
         self._last_translation_confidence = 0.8  # Default confidence
+        self._last_translation_source = 'none'
         
         # Initialize heuristics
         self._init_heuristics()
@@ -381,51 +391,158 @@ class NLUAnalyzer:
 
     
     def _translate_to_english(self, tamil_text: str) -> str:
-        """Translate Tamil text to English using improved methods."""
+        """Translate Tamil text to English using improved methods.
+
+        Strategy:
+        1) Try Google Cloud Translate (if available)
+        2) Fallback to googletrans (if available)
+        3) Caller may invoke sentence-wise retries if output quality is low
+        """
         if not tamil_text or not tamil_text.strip():
             return ""
         
-        # Use Google Cloud Translate if available
-        if TRANSLATION_AVAILABLE:
+        # Use Google Cloud Translate and googletrans if available
+        if HAVE_CLOUD_TRANSLATE or HAVE_GOOGLETRANS:
+            # Try Google Cloud Translate first (better quality)
             try:
-                # Try Google Cloud Translate first (better quality)
-                if 'translate' in globals():
+                if HAVE_CLOUD_TRANSLATE and translate is not None:
                     translate_client = translate.Client()
                     translation = translate_client.translate(tamil_text, source_language='ta', target_language='en')
-                    if translation and translation['translatedText']:
+                    if translation and translation.get('translatedText'):
                         logger.debug(f"Google Cloud Translate: '{tamil_text[:50]}...' -> '{translation['translatedText'][:50]}...'")
                         # Set high confidence for Google Cloud Translate
                         self._last_translation_confidence = 0.9
+                        self._last_translation_source = 'google_cloud'
                         return self._post_process_translation(translation['translatedText'])
-                
-                # Fallback to googletrans
-                elif 'Translator' in globals():
-                    translator = Translator()
-                    # Detect if the text is actually Tamil
-                    detected = translator.detect(tamil_text)
-                    
-                    if detected.lang == 'ta':  # Tamil detected
-                        translation = translator.translate(tamil_text, src='ta', dest='en')
-                        if translation and translation.text:
-                            logger.debug(f"googletrans fallback: '{tamil_text[:50]}...' -> '{translation.text[:50]}...'")
-                            # Set medium confidence for googletrans
-                            self._last_translation_confidence = 0.7
-                            return self._post_process_translation(translation.text)
-                    else:
-                        logger.debug(f"Text not detected as Tamil: {detected.lang}")
-                        
             except Exception as e:
-                # If Cloud Translation is disabled, stop retrying Cloud this run
                 msg = str(e)
+                # If Cloud Translation is disabled, stop retrying Cloud this run
                 if 'SERVICE_DISABLED' in msg or 'permission' in msg.lower() or '403' in msg:
-                    logger.warning(f"Translation failed: {e}. Disabling cloud translate for this run; using fallback.")
-                    globals().pop('translate', None)
+                    logger.warning(f"Cloud translate failed: {e}. Skipping cloud for this run.")
                 else:
-                    logger.warning(f"Translation failed: {e}. Using fallback method.")
+                    logger.warning(f"Cloud translate error: {e}. Will try googletrans.")
+
+            # Always try googletrans next if available (even if cloud exists but returned empty)
+            try:
+                if HAVE_GOOGLETRANS and Translator is not None:
+                    # Force src='ta' without detect (detect can be flaky), provide service_urls for reliability
+                    try:
+                        translator = Translator(raise_exception=True, service_urls=[
+                            'translate.googleapis.com',
+                            'translate.google.com',
+                            'translate.google.co.in'
+                        ])
+                    except Exception:
+                        translator = Translator(raise_exception=True)
+                    translation = translator.translate(tamil_text, src='ta', dest='en')
+                    if translation and getattr(translation, 'text', None):
+                        logger.debug(f"googletrans: '{tamil_text[:50]}...' -> '{translation.text[:50]}...'")
+                        # Set medium confidence for googletrans
+                        self._last_translation_confidence = 0.72
+                        self._last_translation_source = 'googletrans'
+                        return self._post_process_translation(translation.text)
+            except Exception as e:
+                logger.warning(f"googletrans error: {e}. Will use dictionary fallback.")
         
         # Fallback to improved dictionary-based translation
         self._last_translation_confidence = 0.5  # Lower confidence for fallback
+        self._last_translation_source = 'fallback_dict'
         return self._fallback_translate_to_english(tamil_text)
+
+    def _translate_sentences_join(self, tamil_text: str) -> str:
+        """Retry by splitting into sentences and translating piecewise, then joining."""
+        import re as _re
+        chunks: List[str] = []
+        text = tamil_text.strip()
+        if not text:
+            return ""
+        # Split on sentence punctuation, keep delimiters
+        parts = _re.split(r'([\.\!\?\u0964\u0965])', text)
+        buf = ''
+        for p in parts:
+            if not p:
+                continue
+            buf += p
+            if p in ['.', '!', '?', '\u0964', '\u0965']:
+                if buf.strip():
+                    chunks.append(buf.strip())
+                buf = ''
+        if buf.strip():
+            chunks.append(buf.strip())
+
+        # Translate each chunk using best available MT
+        translations: List[str] = []
+        original_source = self._last_translation_source
+        local_source = None
+        for ch in chunks:
+            seg_en = ""
+            if HAVE_CLOUD_TRANSLATE or HAVE_GOOGLETRANS:
+                try:
+                    if HAVE_CLOUD_TRANSLATE and translate is not None:
+                        translate_client = translate.Client()
+                        tr = translate_client.translate(ch, source_language='ta', target_language='en')
+                        seg_en = tr.get('translatedText') or ''
+                        local_source = 'google_cloud_sentence'
+                    elif HAVE_GOOGLETRANS and Translator is not None:
+                        try:
+                            translator = Translator(raise_exception=True, service_urls=[
+                                'translate.googleapis.com',
+                                'translate.google.com',
+                                'translate.google.co.in'
+                            ])
+                        except Exception:
+                            translator = Translator(raise_exception=True)
+                        tr = translator.translate(ch, src='ta', dest='en')
+                        seg_en = getattr(tr, 'text', '') or ''
+                        local_source = 'googletrans_sentence'
+                except Exception:
+                    seg_en = ''
+            if not seg_en:
+                # fallback dictionary word-by-word for chunk
+                seg_en = self._fallback_translate_to_english(ch)
+                if not local_source:
+                    local_source = 'fallback_dict_sentence'
+            seg_en = self._post_process_translation(seg_en)
+            seg_en = re.sub(r"[\u0B80-\u0BFF]", "", seg_en).strip()
+            translations.append(seg_en)
+
+        # Adjust confidence/source conservatively for sentence-wise approach
+        if local_source:
+            self._last_translation_source = local_source
+            if local_source.startswith('google_cloud'):
+                self._last_translation_confidence = 0.88
+            elif local_source.startswith('googletrans'):
+                self._last_translation_confidence = 0.72
+            else:
+                self._last_translation_confidence = 0.55
+        else:
+            self._last_translation_source = original_source or 'unknown'
+        return ' '.join([t for t in translations if t])
+
+    def _generate_template_translation(self, segment: 'Segment') -> tuple:
+        """Heuristically create an English sentence from intent/products when MT is weak."""
+        # Prefer first detected product readable name
+        product_phrase = None
+        if segment.products:
+            # Use product_name as human-readable phrase
+            pname = segment.products[0].get('product_name')
+            if pname:
+                product_phrase = pname.replace('_', ' ')
+        intent = segment.intent or 'other'
+        if intent == 'purchase_request':
+            text = f"Please give some {product_phrase or 'items'}."
+            return text, 0.7
+        if intent == 'product_praise':
+            text = f"{(product_phrase or 'Products').capitalize()} are good today."
+            return text, 0.7
+        if intent == 'purchase_positive':
+            text = f"We will buy {product_phrase or 'it'}."
+            return text, 0.65
+        if intent in ['purchase_negative', 'complaint']:
+            text = f"Customer complains and may not buy{(' ' + product_phrase) if product_phrase else ''}."
+            return text, 0.65
+        # Fallback generic
+        return "General remark.", 0.6
     
     def _post_process_translation(self, english_text: str) -> str:
         """Post-process English translation to improve quality."""
@@ -572,42 +689,49 @@ class NLUAnalyzer:
             timestamp = self._generate_timestamp(anchor_time, start_seconds)
             
             # Create segment object with improved fields
+            # 1) Primary translation
             english_translation = self._translate_to_english(cleaned_text)
+            if english_translation:
+                english_translation = re.sub(r"[\u0B80-\u0BFF]", "", english_translation).strip()
             translation_confidence = 0.8
             is_translated = False
-            
-            # Determine translation quality and confidence
-            if english_translation:
-                # Check if translation is actually English (not just transliteration)
-                english_words = english_translation.split()
-                if len(english_words) >= 2:  # At least 2 words for a real translation
-                    # Check if translation contains actual English words
-                    english_word_count = sum(1 for word in english_words 
-                                           if re.match(r'^[a-zA-Z]+$', word) and len(word) > 2)
-                    if english_word_count >= len(english_words) * 0.7:  # 70% should be English words
-                        is_translated = True
-                        translation_confidence = 0.85
-                    else:
-                        # Likely transliteration, not real translation
-                        translation_confidence = self._last_translation_confidence * 0.6  # Reduce confidence for transliteration
-                        is_translated = False
-                else:
-                    # Too short to be a real translation
-                    translation_confidence = 0.3
-                    is_translated = False
+
+            def _is_good_english(txt: str) -> bool:
+                if not txt:
+                    return False
+                stripped = txt.strip()
+                if len(stripped) < 3:
+                    return False
+                if re.search(r"[\u0B80-\u0BFF]", stripped):
+                    return False
+                words = re.findall(r"[A-Za-z]+", stripped)
+                if len(words) < max(3, self.config.get('translation', {}).get('min_words_english', 4)):
+                    return False
+                english_word_count = sum(1 for w in words if len(w) > 2)
+                return english_word_count >= max(3, int(0.7 * len(words)))
+
+            # Quality gate; attempt sentence-wise if poor
+            if not _is_good_english(english_translation):
+                english_translation = self._translate_sentences_join(cleaned_text)
+
+            # If still poor, attempt literal dictionary reconstruction (word-by-word)
+            if not _is_good_english(english_translation):
+                english_translation = self._post_process_translation(
+                    self._fallback_translate_to_english(cleaned_text)
+                )
+                english_translation = re.sub(r"[\u0B80-\u0BFF]", "", english_translation).strip()
+                self._last_translation_source = 'fallback_dict_literal'
+                self._last_translation_confidence = 0.6 if len(english_translation.split()) >= 4 else 0.5
+
+            # Final quality assessment
+            if _is_good_english(english_translation):
+                is_translated = True
+                # Use the confidence from the last method used, with floor at 0.75 for acceptable outputs
+                translation_confidence = max(0.75, self._last_translation_confidence or 0.8)
             else:
-                translation_confidence = 0.0
-                is_translated = False
-            
-            # Enrich too-short translations for requests
-            if english_translation and len(english_translation.split()) < self.config.get('translation', {}).get('min_words_english', 4):
-                enriched = self._enrich_short_translation(cleaned_text, english_translation)
-                if enriched:
-                    english_translation = enriched
-                    # Re-evaluate translation quality after enrichment
-                    if len(enriched.split()) >= 3:
-                        is_translated = True
-                        translation_confidence = 0.8
+                # As a last resort, keep whatever we have but mark low confidence (still no heuristic template summaries)
+                translation_confidence = 0.5 if english_translation else 0.0
+                is_translated = bool(english_translation)
             
             seg = Segment(
                 seller_id=seller_id,
@@ -622,6 +746,7 @@ class NLUAnalyzer:
                 textEnglish=english_translation,  # Improved English translation
                 is_translated=is_translated,
                 translation_confidence=translation_confidence,
+                translation_source=self._last_translation_source,
                 asr_confidence=segment.get('confidence', 0.8)
             )
             
@@ -653,6 +778,9 @@ class NLUAnalyzer:
             
             # Validate and fix logical contradictions
             self._validate_and_fix_contradictions(seg)
+
+            # Ensure every segment has reliable English translation without generic templates
+            # If still extremely poor, we keep the best-effort literal translation already applied above.
 
             # Compute final needs_human_review flag now that all fields are set
             seg._compute_needs_human_review()

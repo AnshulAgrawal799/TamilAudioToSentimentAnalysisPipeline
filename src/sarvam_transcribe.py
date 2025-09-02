@@ -31,35 +31,84 @@ class SarvamTranscriptionResult:
         self.model_used = "saarika:v2.5"
         
     def add_segment(self, start: float, end: float, text: str, confidence: float = None, speaker: str = None):
-        """Add a transcription segment."""
+        """Add a transcription segment.
+        Also split overly-long utterances into smaller sub-segments to improve granularity.
+        """
         # Calculate improved confidence based on text quality
         if confidence is None:
-            # Base confidence from Sarvam API
             base_confidence = 0.8
-            
-            # Boost confidence for longer, well-formed text
             if len(text.strip()) > 10:
                 base_confidence += 0.1
-            
-            # Boost confidence for text with proper Tamil characters
             tamil_chars = sum(1 for c in text if '\u0B80' <= c <= '\u0BFF')
-            if tamil_chars > len(text) * 0.3:  # More than 30% Tamil characters
+            if tamil_chars > len(text) * 0.3:
                 base_confidence += 0.05
-            
-            # Reduce confidence for very short text
             if len(text.strip()) < 5:
                 base_confidence -= 0.1
-            
             confidence = min(0.95, max(0.6, base_confidence))
-        
-        segment = {
-            'start': start,
-            'end': end,
-            'text': text.strip(),
-            'confidence': confidence,
-            'speaker': speaker
-        }
-        self.segments.append(segment)
+
+        # Heuristic split: sentence boundaries and max token length
+        def _split_text(text_value: str) -> List[str]:
+            import re as _re
+            cleaned = text_value.strip()
+            if not cleaned:
+                return []
+            # Split on Tamil/English sentence punctuation while keeping balance
+            parts = []
+            for chunk in _re.split(r'([\.!?\u0964\u0965])', cleaned):
+                if not chunk:
+                    continue
+                if parts and len(parts[-1]) == 1 and parts[-1] in ['.', '!', '?', '\u0964', '\u0965']:
+                    parts[-1] = parts[-1] + chunk
+                else:
+                    parts.append(chunk)
+            # Rejoin punctuation with preceding text
+            sentences: List[str] = []
+            buf = ''
+            for p in parts:
+                if p and p[-1] in '.!?\u0964\u0965':
+                    buf += p
+                    if buf.strip():
+                        sentences.append(buf.strip())
+                    buf = ''
+                else:
+                    buf += ((' ' if buf else '') + p)
+            if buf.strip():
+                sentences.append(buf.strip())
+
+            # Further chunk very long sentences by approximate word count
+            final_chunks: List[str] = []
+            for sent in sentences:
+                words = sent.split()
+                max_words = 18
+                if len(words) <= max_words:
+                    final_chunks.append(sent)
+                else:
+                    for i in range(0, len(words), max_words):
+                        final_chunks.append(' '.join(words[i:i+max_words]))
+            return final_chunks
+
+        sub_texts = _split_text(text)
+        if not sub_texts:
+            return
+
+        total_len = max(1, sum(len(t) for t in sub_texts))
+        total_duration = max(0.01, float(end) - float(start))
+        cursor = float(start)
+        for idx, sub in enumerate(sub_texts):
+            # Proportional allocation based on text length
+            share = len(sub) / total_len
+            sub_dur = total_duration * share
+            sub_start = cursor
+            sub_end = sub_start + sub_dur
+            cursor = sub_end
+            segment = {
+                'start': float(sub_start),
+                'end': float(sub_end),
+                'text': sub.strip(),
+                'confidence': confidence,
+                'speaker': speaker
+            }
+            self.segments.append(segment)
     
     def get_segments(self) -> List[Dict[str, Any]]:
         """Get all segments."""
@@ -304,7 +353,8 @@ class SarvamTranscriber:
                 files = {'file': (audio_path.name, f, 'audio/wav')}
                 data = {
                     'model': self.model,
-                    'language_code': self.language_code
+                    'language_code': self.language_code,
+                    'with_timestamps': True
                 }
                 try:
                     response = self.session.post(
@@ -370,19 +420,44 @@ class SarvamTranscriber:
                 # Single text response
                 text = api_result.get('text', '').strip()
                 if text:
-                    result.add_segment(0.0, 1.0, text, 0.8, None)
+                    # Estimate duration from file to avoid placeholder timestamps
+                    try:
+                        import wave as _wave_est
+                        with _wave_est.open(str(audio_path), 'rb') as _wf:
+                            _frames = _wf.getnframes()
+                            _rate = _wf.getframerate()
+                            _dur = max(1.0, _frames / float(_rate))
+                    except Exception:
+                        _dur = 1.0
+                    result.add_segment(0.0, _dur, text, 0.8, None)
             elif 'transcript' in api_result:
                 # Transcript field
                 text = api_result.get('transcript', '').strip()
                 if text:
-                    result.add_segment(0.0, 1.0, text, 0.8, None)
+                    try:
+                        import wave as _wave_est2
+                        with _wave_est2.open(str(audio_path), 'rb') as _wf2:
+                            _frames2 = _wf2.getnframes()
+                            _rate2 = _wf2.getframerate()
+                            _dur2 = max(1.0, _frames2 / float(_rate2))
+                    except Exception:
+                        _dur2 = 1.0
+                    result.add_segment(0.0, _dur2, text, 0.8, None)
             elif 'result' in api_result:
                 # Nested result structure
                 result_data = api_result.get('result', {})
                 if isinstance(result_data, dict):
                     text = result_data.get('text', '').strip()
                     if text:
-                        result.add_segment(0.0, 1.0, text, 0.8, None)
+                        try:
+                            import wave as _wave_est3
+                            with _wave_est3.open(str(audio_path), 'rb') as _wf3:
+                                _frames3 = _wf3.getnframes()
+                                _rate3 = _wf3.getframerate()
+                                _dur3 = max(1.0, _frames3 / float(_rate3))
+                        except Exception:
+                            _dur3 = 1.0
+                        result.add_segment(0.0, _dur3, text, 0.8, None)
         
         for segment in segments:
             start = segment.get('start', 0.0)
