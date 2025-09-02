@@ -207,21 +207,52 @@ def main():
         logger.info("Step 3: Running NLU analysis with utterance-level segmentation...")
         analyzer = NLUAnalyzer(config)
         analyzed_segments = []
+        # Create a deterministic run id for this pipeline execution
+        from datetime import datetime as _dt
+        import uuid as _uuid
+        pipeline_run_id = f"run-{_dt.now().strftime('%Y%m%d%H%M%S')}-{str(_uuid.uuid4())[:6]}"
         
         for result in transcript_results:
             # Process each transcription result and create utterance-level segments
             segments = analyzer.analyze(result)
+            # Inject run-level and provenance metadata
+            for seg in segments:
+                try:
+                    seg.pipeline_run_id = pipeline_run_id
+                    seg.source_provider = getattr(result, 'provider', None)
+                    seg.source_model = getattr(result, 'model_used', None)
+                except Exception:
+                    pass
             
             # Add utterance indices and ensure proper timing
+            # Normalize and align timings per audio
+            # Sort by start_ms to compute monotonic, non-overlapping boundaries
+            segments.sort(key=lambda s: (s.start_ms, s.end_ms))
+            last_end = 0
+            min_gap_ms = 20
             for i, segment in enumerate(segments):
+                # Ensure indices stable after sort
                 segment.utterance_index = i
-                
-                # Ensure accurate timing - fail if timing can't be computed
-                if segment.start_ms == 0 and segment.end_ms == 1000:
+                # Clamp to non-negative
+                if segment.start_ms is None:
+                    segment.start_ms = 0
+                if segment.end_ms is None:
+                    segment.end_ms = max(segment.start_ms + 1, last_end + 1)
+                segment.start_ms = max(0, int(segment.start_ms))
+                segment.end_ms = max(int(segment.end_ms), segment.start_ms + 1)
+                # Enforce monotonic non-overlap
+                if segment.start_ms < last_end + min_gap_ms:
+                    segment.start_ms = last_end + min_gap_ms
+                if segment.end_ms <= segment.start_ms:
+                    segment.end_ms = segment.start_ms + max(200, min_gap_ms)
+                # Update duration
+                segment.duration_ms = segment.end_ms - segment.start_ms
+                last_end = segment.end_ms
+                # Flag placeholder timings
+                if segment.start_ms == 0 and segment.end_ms in (1, 1000):
                     logger.warning(f"Segment {segment.segment_id} has placeholder timing - marking for human review")
                     segment.needs_human_review = True
-                    segment.asr_confidence = 0.5  # Lower confidence for timing issues
-                
+                    segment.asr_confidence = min(segment.asr_confidence or 0.5, 0.5)
                 # Generate proper ISO timestamp
                 try:
                     base_time = dateparser.isoparse(result.metadata.get('recording_start', '2025-08-19T00:00:00Z'))

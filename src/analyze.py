@@ -89,6 +89,9 @@ class Segment:
             'absa': 'absa-0.2.7'
         })
         self.pipeline_run_id = kwargs.get('pipeline_run_id', f"run-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4]}")
+        # Provenance
+        self.source_provider = kwargs.get('source_provider')
+        self.source_model = kwargs.get('source_model')
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -128,7 +131,9 @@ class Segment:
             'needs_human_review': needs_review,
             'product_intent_confidences': self.product_intent_confidences,
             'model_versions': self.model_versions,
-            'pipeline_run_id': self.pipeline_run_id
+            'pipeline_run_id': self.pipeline_run_id,
+            'source_provider': self.source_provider,
+            'source_model': self.source_model
         }
 
     def _compute_needs_human_review(self) -> bool:
@@ -410,7 +415,13 @@ class NLUAnalyzer:
                         logger.debug(f"Text not detected as Tamil: {detected.lang}")
                         
             except Exception as e:
-                logger.warning(f"Translation failed: {e}. Using fallback method.")
+                # If Cloud Translation is disabled, stop retrying Cloud this run
+                msg = str(e)
+                if 'SERVICE_DISABLED' in msg or 'permission' in msg.lower() or '403' in msg:
+                    logger.warning(f"Translation failed: {e}. Disabling cloud translate for this run; using fallback.")
+                    globals().pop('translate', None)
+                else:
+                    logger.warning(f"Translation failed: {e}. Using fallback method.")
         
         # Fallback to improved dictionary-based translation
         self._last_translation_confidence = 0.5  # Lower confidence for fallback

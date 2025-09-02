@@ -133,6 +133,9 @@ class SarvamTranscriber:
         self.batch_enabled = config.get('asr_batch_enabled', True)
         self.batch_max_files = config.get('asr_batch_max_files_per_job', 20)
         self.concurrency_limit = config.get('asr_concurrency_limit', 3)
+        # Client-side throttling to reduce 429s
+        self.min_request_interval_sec = config.get('asr_min_request_interval_sec', 0.5)
+        self._last_request_ts = 0.0
         
         # Retry configuration
         retry_config = config.get('asr_retry', {})
@@ -289,34 +292,61 @@ class SarvamTranscriber:
         if file_size > 100 * 1024 * 1024:  # 100MB limit
             raise ValueError(f"Audio file {audio_path.name} is too large ({file_size} bytes)")
         
-        with open(audio_path, 'rb') as f:
-            files = {'file': (audio_path.name, f, 'audio/wav')}
-            data = {
-                'model': self.model,
-                'language_code': self.language_code
-            }
-            
-            try:
-                response = self.session.post(
-                    self.sync_endpoint,
-                    files=files,
-                    data=data,
-                    headers=headers,
-                    timeout=120
-                )
-                response.raise_for_status()
-                
-            except requests.exceptions.HTTPError as e:
-                # Log detailed error information
-                error_detail = "Unknown error"
+        # Retry with exponential backoff and Retry-After support (for 429)
+        attempt = 0
+        backoff = float(self.backoff_factor) if self.backoff_factor else 2.0
+        while True:
+            # Enforce minimum spacing between requests
+            elapsed = time.time() - self._last_request_ts
+            if elapsed < self.min_request_interval_sec:
+                time.sleep(self.min_request_interval_sec - elapsed)
+            with open(audio_path, 'rb') as f:
+                files = {'file': (audio_path.name, f, 'audio/wav')}
+                data = {
+                    'model': self.model,
+                    'language_code': self.language_code
+                }
                 try:
-                    error_response = e.response.json()
-                    error_detail = error_response.get('error', {}).get('message', str(error_response))
-                except:
-                    error_detail = e.response.text if e.response else str(e)
-                
-                logger.error(f"Sarvam API error for {audio_path.name}: {e.response.status_code} - {error_detail}")
-                raise ValueError(f"Sarvam API error: {error_detail}")
+                    response = self.session.post(
+                        self.sync_endpoint,
+                        files=files,
+                        data=data,
+                        headers=headers,
+                        timeout=120
+                    )
+                    self._last_request_ts = time.time()
+                    if response.status_code == 429:
+                        retry_after = response.headers.get('Retry-After')
+                        delay = float(retry_after) if retry_after and str(retry_after).isdigit() else min(30.0, backoff)
+                        logger.warning(f"Rate limited (429) for {audio_path.name}. Sleeping {delay:.1f}s before retry (attempt {attempt+1}/{self.max_attempts})")
+                        time.sleep(delay)
+                        attempt += 1
+                        if attempt >= self.max_attempts:
+                            raise ValueError("Sarvam API error: Rate limit exceeded")
+                        backoff *= 2
+                        continue
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.HTTPError as e:
+                    status_code = e.response.status_code if e.response is not None else None
+                    try:
+                        parsed = e.response.json() if e.response is not None else None
+                        error_detail = parsed.get('error', {}).get('message', str(parsed)) if parsed else str(e)
+                    except Exception:
+                        error_detail = e.response.text if e.response is not None else str(e)
+                    if status_code == 429:
+                        retry_after = e.response.headers.get('Retry-After') if e.response is not None else None
+                        delay = float(retry_after) if retry_after and str(retry_after).isdigit() else min(30.0, backoff)
+                        logger.warning(f"Sarvam API 429 for {audio_path.name}: {error_detail}. Sleeping {delay:.1f}s (attempt {attempt+1}/{self.max_attempts})")
+                        time.sleep(delay)
+                        attempt += 1
+                        if attempt >= self.max_attempts:
+                            logger.error(f"Sarvam API error for {audio_path.name}: 429 - {error_detail}")
+                            raise ValueError("Sarvam API error: Rate limit exceeded")
+                        backoff *= 2
+                        continue
+                    logger.error(f"Sarvam API error for {audio_path.name}: {status_code} - {error_detail}")
+                    raise ValueError(f"Sarvam API error: {error_detail}")
             
         result = response.json()
         return self._parse_transcription_result(audio_path, result)
@@ -542,6 +572,10 @@ class SarvamTranscriber:
                     except Exception as e:
                         import traceback as _tb
                         logger.warning(f"Failed to transcribe chunk {i+1}/{len(chunks)} {chunk_path.name}: {e}\n{_tb.format_exc()}")
+                        if 'Rate limit exceeded' in str(e) or '429' in str(e):
+                            sleep_s = min(60.0, 2.0 * self.backoff_factor)
+                            logger.info(f"Backing off {sleep_s:.1f}s due to rate limit before next chunk")
+                            time.sleep(sleep_s)
                         continue
                 
                 if successful_chunks == 0:
