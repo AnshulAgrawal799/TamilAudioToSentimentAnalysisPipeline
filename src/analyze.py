@@ -53,6 +53,8 @@ class Segment:
     """Represents a single analyzed segment."""
 
     def __init__(self, **kwargs):
+        self.audio_type = kwargs.get(
+            'audio_type', None)  # speech|jingle|silence
         self.seller_id = kwargs.get('seller_id', 'UNKNOWN_SELLER')
         self.stop_id = kwargs.get('stop_id', 'UNKNOWN_STOP')
         self.segment_id = kwargs.get(
@@ -117,6 +119,7 @@ class Segment:
         # Always compute current human-review flag at serialization time
         needs_review = self._compute_needs_human_review()
         return {
+            'audio_type': self.audio_type,
             'seller_id': self.seller_id,
             'stop_id': self.stop_id,
             'segment_id': self.segment_id,
@@ -202,6 +205,68 @@ class Segment:
 
 
 class NLUAnalyzer:
+
+    def _fallback_translate_to_english(self, tamil_text: str) -> str:
+        """Fallback: Translate Tamil text to English word-by-word using a static dictionary."""
+        if not tamil_text:
+            return ""
+        translations = {
+            'காலை வணக்கம்': 'Good morning',
+            'மாலை வணக்கம்': 'Good evening',
+            'நன்றி': 'Thank you',
+            'உள்ளது': 'available',
+            'இல்லை': 'not available',
+            'விலை': 'price',
+            'எவ்வளவு': 'how much',
+            'கிலோ': 'kilogram',
+            'ரூபாய்': 'rupees',
+            'தேவை': 'need',
+            'விரும்புகிறேன்': 'I want',
+            'வாங்குகிறேன்': 'I will buy',
+            'வாங்குவோம்': 'We will buy',
+            'கொடுங்கள்': 'Please give',
+            'எடுத்துக்கொள்கிறேன்': 'I will take',
+            'நன்று': 'good',
+            'சிறந்த': 'excellent',
+            'மோசம்': 'bad',
+            'தவறு': 'wrong',
+            'பிரச்சினை': 'problem',
+            'தள்ளுபடி': 'discount',
+            'மலிவு': 'cheap',
+            'பேரம்': 'bargain',
+            'உள்ளதா': 'Is it available?',
+            'கிடைக்குமா': 'Can I get it?',
+            'வாங்க': 'buy',
+            'கொடுங்க': 'give',
+            'நல்ல': 'good',
+            'அருமை': 'wonderful',
+            'மகிழ்ச்சி': 'happiness',
+            'திருப்தி': 'satisfaction',
+            'வருத்தம்': 'sadness',
+            'கோபம்': 'anger',
+            'சரி': 'okay',
+            'பரவாயில்லை': 'no problem',
+            'சாதாரண': 'normal',
+            'வழக்கம்': 'usual',
+            'தக்காலி': 'tomato',
+            'காய்': 'vegetable',
+            'கொத்தமல்லி': 'coriander',
+            'கருவப்புல்': 'curry leaves',
+            'காலான்': 'gallon',
+            'தனமு': 'coconut'
+        }
+        # Try to translate the entire text first
+        if tamil_text in translations:
+            return translations[tamil_text]
+        # Otherwise, translate word by word
+        words = tamil_text.split()
+        translated_words = []
+        for word in words:
+            if word in translations:
+                translated_words.append(translations[word])
+            else:
+                translated_words.append(word)
+        return ' '.join(translated_words)
     """Handles NLU analysis for transcribed segments."""
 
     def __init__(self, config: Dict[str, Any]):
@@ -344,12 +409,13 @@ class NLUAnalyzer:
         }
 
     def _clean_asr_text(self, text: str) -> str:
-        """Clean ASR text by removing noise and improving Tamil text quality."""
+        """Clean ASR text by removing noise, fillers, stopwords, and improving Tamil text quality."""
+        import unicodedata
         if not text or not text.strip():
             return ""
 
-        # Step 1: Remove common ASR artifacts and noise
-        cleaned = text.strip()
+        # Unicode normalization (NFC)
+        cleaned = unicodedata.normalize('NFC', text.strip())
 
         # Remove repeated nonsense tokens (like "nishakku nishakku")
         cleaned = re.sub(r'\b(\w+)(?:\s+\1){2,}\b', r'\1', cleaned)
@@ -375,31 +441,49 @@ class NLUAnalyzer:
             cleaned = cleaned.replace(noise, '')
 
         # Step 2: Clean up Tamil text specifically
-        # Remove non-Tamil characters that aren't basic punctuation
         cleaned = re.sub(
             r'[^\u0B80-\u0BFF\u0020-\u007E\u0964\u0965\u002E\u002C\u003F\u0021]', '', cleaned)
 
         # Step 3: Fix common ASR errors in Tamil
-        # Remove repeated characters (like "வாங்குுு")
         cleaned = re.sub(r'([\u0B80-\u0BFF])\1{2,}', r'\1', cleaned)
 
         # Remove isolated punctuation
         cleaned = re.sub(r'\s+[^\u0B80-\u0BFFa-zA-Z\s]+\s+', ' ', cleaned)
 
-        # Step 4: Clean up whitespace
+        # Normalize punctuation (replace multiple . , ? ! with single, standardize sentence boundaries)
+        cleaned = re.sub(r'[\.]{2,}', '.', cleaned)
+        cleaned = re.sub(r'[\!]{2,}', '!', cleaned)
+        cleaned = re.sub(r'[\?]{2,}', '?', cleaned)
+        cleaned = re.sub(r'[\,]{2,}', ',', cleaned)
+
+        # Step 4: Remove filler words and stopwords
+        config = getattr(self, 'config', {})
+        norm_cfg = config.get('text_normalization', {})
+        tamil_fillers = set(norm_cfg.get('tamil_fillers', []))
+        english_fillers = set(norm_cfg.get('english_fillers', []))
+        tamil_stopwords = set(norm_cfg.get('tamil_stopwords', []))
+        english_stopwords = set(norm_cfg.get('english_stopwords', []))
+
+        words = cleaned.split()
+        filtered_words = []
+        for w in words:
+            w_strip = w.strip('.,?!')
+            if w_strip in tamil_fillers or w_strip in english_fillers:
+                continue
+            if w_strip in tamil_stopwords or w_strip in english_stopwords:
+                continue
+            filtered_words.append(w)
+        cleaned = ' '.join(filtered_words)
+
+        # Step 5: Clean up whitespace
         cleaned = re.sub(r'\s+', ' ', cleaned)
         cleaned = cleaned.strip()
 
-        # Step 5: Quality checks
-        # Skip if text is too short after cleaning
+        # Step 6: Quality checks
         if len(cleaned) < 3:
             return ""
-
-        # Skip if no Tamil characters remain
         if not re.search(r'[\u0B80-\u0BFF]', cleaned):
             return ""
-
-        # Skip if text is mostly punctuation
         if len(re.sub(r'[^\u0B80-\u0BFFa-zA-Z]', '', cleaned)) < len(cleaned) * 0.3:
             return ""
 
@@ -573,31 +657,10 @@ class NLUAnalyzer:
             return ""
 
         # Fix common translation artifacts
-        cleaned = english_text.strip()
-
-        # Remove extra quotes
-        cleaned = re.sub(r'^["\']+|["\']+$', '', cleaned)
-
-        # Fix common Tamil-English translation issues
-        fixes = {}
-
-        for bad_translation, good_translation in fixes.items():
-            if bad_translation in cleaned:
-                cleaned = cleaned.replace(bad_translation, good_translation)
-
-        return cleaned
-
-    def _fallback_translate_to_english(self, tamil_text: str) -> str:
-        """Improved fallback translation using dictionary for common Tamil phrases."""
-        # Enhanced dictionary-based translation for common phrases
         translations = {
-            # Greetings
-            'வணக்கம்': 'Hello',
-            'நமஸ்காரம்': 'Namaste',
             'காலை வணக்கம்': 'Good morning',
             'மாலை வணக்கம்': 'Good evening',
             'நன்றி': 'Thank you',
-
             # Common words
             'உள்ளது': 'available',
             'இல்லை': 'not available',
@@ -633,7 +696,6 @@ class NLUAnalyzer:
             'பரவாயில்லை': 'no problem',
             'சாதாரண': 'normal',
             'வழக்கம்': 'usual',
-
             # Vegetables and items
             'தக்காலி': 'tomato',
             'காய்': 'vegetable',
@@ -644,20 +706,18 @@ class NLUAnalyzer:
         }
 
         # Try to translate the entire text first
-        if tamil_text in translations:
-            return translations[tamil_text]
+        if english_text in translations:
+            return translations[english_text]
 
         # Try to translate word by word
-        words = tamil_text.split()
+        words = english_text.split()
         translated_words = []
-
         for word in words:
             if word in translations:
                 translated_words.append(translations[word])
             else:
                 # Keep untranslated words as-is
                 translated_words.append(word)
-
         return ' '.join(translated_words)
 
     def analyze(self, transcription_result) -> List[Segment]:
@@ -683,6 +743,29 @@ class NLUAnalyzer:
 
             # Clean ASR text
             cleaned_text = self._clean_asr_text(raw_text)
+
+            # --- AUDIO TYPE CLASSIFICATION ---
+            def classify_audio_type(segment, cleaned_text):
+                # If segment text is empty or very short, likely silence/noise
+                if not cleaned_text or cleaned_text.strip() == '':
+                    return 'silence'
+                # If segment contains musical/jingle cues (simple heuristic)
+                music_keywords = ['music', 'jingle', 'tune',
+                                  'melody', 'ringtone', 'ad', 'advertisement']
+                text_lower = cleaned_text.lower()
+                if any(kw in text_lower for kw in music_keywords):
+                    return 'jingle'
+                # If segment is very repetitive or matches known jingle patterns
+                if len(set(text_lower.split())) <= 2 and len(text_lower.split()) > 0:
+                    # e.g. repeated melody/tune
+                    return 'jingle'
+                # If segment is mostly non-language (no Tamil/English letters)
+                if not re.search(r'[\u0B80-\u0BFFa-zA-Z]', cleaned_text):
+                    return 'silence'
+                # Otherwise, assume speech
+                return 'speech'
+
+            audio_type = classify_audio_type(segment, cleaned_text)
 
             # Skip very short segments after cleaning
             if len(cleaned_text.split()) < self.min_segment_words:
@@ -762,7 +845,8 @@ class NLUAnalyzer:
                 is_translated=is_translated,
                 translation_confidence=translation_confidence,
                 translation_source=self._last_translation_source,
-                asr_confidence=segment.get('confidence', 0.8)
+                asr_confidence=segment.get('confidence', 0.8),
+                audio_type=audio_type
             )
 
             # Use speaker information from Sarvam if available, otherwise analyze
