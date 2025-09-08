@@ -115,48 +115,59 @@ class Segment:
         self.source_model = kwargs.get('source_model')
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        # Always compute current human-review flag at serialization time
+        """Convert to dictionary for JSON serialization (canonicalized schema)."""
         needs_review = self._compute_needs_human_review()
+        # Prepare translations dict
+        translations = {}
+        if hasattr(self, 'textEnglish') and self.textEnglish:
+            translations['en'] = {
+                'text': self.textEnglish,
+                'model': self.model_versions.get('translation', 'unknown'),
+                'confidence': getattr(self, 'translation_confidence', 0.0)
+            }
+        # Add more languages if needed in future
+
+        # Set is_translated based on translations
+        is_translated = bool(translations)
+
+        # Prepare products list in canonical format
+        products = []
+        for p in getattr(self, 'products', []):
+            if isinstance(p, dict):
+                products.append({
+                    'sku_id': p.get('sku_id', ''),
+                    'product_name': p.get('product_name', ''),
+                    'confidence': p.get('confidence', p.get('product_confidence', 0.0))
+                })
+
         return {
-            'audio_type': self.audio_type,
-            'seller_id': self.seller_id,
-            'stop_id': self.stop_id,
             'segment_id': self.segment_id,
-            'merged_block_id': self.merged_block_id,
-            'utterance_index': self.utterance_index,
-            'timestamp': self.timestamp,
-            'speaker_role': self.speaker_role,
-            'role_confidence': self.role_confidence,
-            'textTamil': self.textTamil,
-            'textEnglish': self.textEnglish,
-            'is_translated': self.is_translated,
-            'translation_confidence': self.translation_confidence,
-            'translation_source': self.translation_source,
-            'intent': self.intent,
-            'intent_confidence': self.intent_confidence,
-            'sentiment_score': self.sentiment_score,
-            'sentiment_label': self.sentiment_label,
-            'emotion': self.emotion,
-            'confidence': self.confidence,
             'audio_file_id': self.audio_file_id,
             'start_ms': self.start_ms,
             'end_ms': self.end_ms,
             'duration_ms': self.duration_ms,
+            'speaker_role': self.speaker_role,
+            'role_confidence': self.role_confidence,
+            'language': 'ta',
+            'text_original': getattr(self, 'textTamil', ''),
+            # TODO: add normalization if available
+            'text_normalized': getattr(self, 'textTamil', ''),
+            'translations': translations,
+            'products': products,
+            'intent': {
+                'label': self.intent,
+                'confidence': self.intent_confidence
+            },
+            'sentiment': {
+                'score': self.sentiment_score,
+                'label': self.sentiment_label
+            },
+            'emotion': self.emotion,
             'asr_confidence': self.asr_confidence,
-            'products': self.products,
-            'product_intents': self.product_intents,
-            'product_sentiments': self.product_sentiments,
-            'action_required': self.action_required,
-            'escalation_needed': self.escalation_needed,
-            'churn_risk': self.churn_risk,
-            'business_opportunity': self.business_opportunity,
-            'needs_human_review': needs_review,
-            'product_intent_confidences': self.product_intent_confidences,
             'model_versions': self.model_versions,
-            'pipeline_run_id': self.pipeline_run_id,
-            'source_provider': self.source_provider,
-            'source_model': self.source_model
+            'is_translated': is_translated,
+            'needs_human_review': needs_review,
+            'review_reasons': getattr(self, 'review_reasons', []),
         }
 
     def _compute_needs_human_review(self) -> bool:
@@ -820,16 +831,23 @@ class NLUAnalyzer:
                 self._last_translation_confidence = 0.6 if len(
                     english_translation.split()) >= 4 else 0.5
 
-            # Final quality assessment
-            if _is_good_english(english_translation):
+            # Final quality assessment (stricter)
+            # Only set is_translated True if translation is good, not fallback, and confidence >= 0.75
+            fallback_sources = {"fallback_dict_literal",
+                                "fallback_dict", "fallback_dict_sentence"}
+            if _is_good_english(english_translation) and \
+                (self._last_translation_confidence or 0.0) >= 0.75 and \
+                    (self._last_translation_source not in fallback_sources):
                 is_translated = True
-                # Use the confidence from the last method used, with floor at 0.75 for acceptable outputs
                 translation_confidence = max(
                     0.75, self._last_translation_confidence or 0.8)
             else:
-                # As a last resort, keep whatever we have but mark low confidence (still no heuristic template summaries)
+                # If fallback or low confidence, do not mark as translated, and clear textEnglish if too short/garbage
+                is_translated = False
+                if not _is_good_english(english_translation) or (self._last_translation_source in fallback_sources):
+                    english_translation = ""
                 translation_confidence = 0.5 if english_translation else 0.0
-                is_translated = bool(english_translation)
+                # Optionally, flag for human review (will be picked up by needs_human_review logic)
 
             seg = Segment(
                 seller_id=seller_id,
