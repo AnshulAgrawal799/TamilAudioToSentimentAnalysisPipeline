@@ -5,6 +5,7 @@ Improved version with better translation quality, standardized roles, and consis
 """
 
 import logging
+import os
 import random
 import uuid
 import re
@@ -16,10 +17,15 @@ from dateutil import parser as dateparser
 logger = logging.getLogger(__name__)
 
 # Import proper translation libraries (load both independently if available)
+
+# Cloud translation control via env var (default: disabled)
+USE_CLOUD_TRANSLATE = os.environ.get(
+    "USE_CLOUD_TRANSLATE", "false").lower() == "true"
 HAVE_CLOUD_TRANSLATE = False
 HAVE_GOOGLETRANS = False
 translate = None
 Translator = None
+
 
 try:
     from google.cloud import translate_v2 as translate  # type: ignore
@@ -512,10 +518,11 @@ class NLUAnalyzer:
             return ""
 
         # Use Google Cloud Translate and googletrans if available
-        if HAVE_CLOUD_TRANSLATE or HAVE_GOOGLETRANS:
+
+        if (USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
             # Try Google Cloud Translate first (better quality)
             try:
-                if HAVE_CLOUD_TRANSLATE and translate is not None:
+                if USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE and translate is not None:
                     translate_client = translate.Client()
                     translation = translate_client.translate(
                         tamil_text, source_language='ta', target_language='en')
@@ -526,14 +533,17 @@ class NLUAnalyzer:
                         self._last_translation_confidence = 0.9
                         self._last_translation_source = 'google_cloud'
                         return self._post_process_translation(translation['translatedText'])
+                elif not USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE:
+                    logger.debug(
+                        "Cloud translation is available but disabled by USE_CLOUD_TRANSLATE env var.")
             except Exception as e:
                 msg = str(e)
                 # If Cloud Translation is disabled, stop retrying Cloud this run
                 if 'SERVICE_DISABLED' in msg or 'permission' in msg.lower() or '403' in msg:
-                    logger.warning(
+                    logger.debug(
                         f"Cloud translate failed: {e}. Skipping cloud for this run.")
                 else:
-                    logger.warning(
+                    logger.debug(
                         f"Cloud translate error: {e}. Will try googletrans.")
 
             # Always try googletrans next if available (even if cloud exists but returned empty)

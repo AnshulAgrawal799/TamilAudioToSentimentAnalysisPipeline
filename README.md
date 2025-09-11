@@ -19,18 +19,20 @@ This pipeline:
 ## Performance Improvements ✅ **IMPLEMENTED**
 
 ### Sarvam Integration Results
+
 - **96% Runtime Reduction**: From ~26 minutes to ~10 seconds for 5 audio files
 - **99% Per-file Speedup**: From 3-5 minutes to 1-2 seconds per file
 - **80% Success Rate**: 4/5 files transcribed successfully
 - **Quality Maintained**: Tamil transcription quality excellent, English translation working
 
 ### Performance Comparison
-| Metric | Original (Whisper) | Sarvam (Implemented) | Improvement |
-|--------|-------------------|---------------------|-------------|
-| Total Runtime | ~26 minutes | ~10 seconds | **96% reduction** |
-| Per-file time | 3-5 minutes | 1-2 seconds | **99% reduction** |
-| Success Rate | 100% | 80% | 4/5 files |
-| Quality | High | High | Maintained |
+
+| Metric        | Original (Whisper) | Sarvam (Implemented) | Improvement       |
+| ------------- | ------------------ | -------------------- | ----------------- |
+| Total Runtime | ~26 minutes        | ~10 seconds          | **96% reduction** |
+| Per-file time | 3-5 minutes        | 1-2 seconds          | **99% reduction** |
+| Success Rate  | 100%               | 80%                  | 4/5 files         |
+| Quality       | High               | High                 | Maintained        |
 
 ## ASR Provider Options
 
@@ -70,7 +72,7 @@ The previous pipeline produced poor English translations with:
 
 ### Configuration
 
-```yaml
+````yaml
 # ASR Provider Settings
 asr_provider: "sarvam" # "sarvam" or "whisper"
 asr_model: "saarika:v2.5" # Sarvam model for Tamil
@@ -83,19 +85,36 @@ transcript_cache_enabled: true # Cache transcripts to avoid re-processing
 whisper_model: "medium" # Fallback Whisper model
 language: "ta" # Tamil language for Whisper
 
+
 # Translation settings
 translation:
-  use_google_cloud: true # Use Google Cloud Translate API
-  fallback_to_googletrans: true # Fallback option
-  batch_size: 10
-  retry_attempts: 3
+   use_google_cloud: true # Use Google Cloud Translate API (overridden by USE_CLOUD_TRANSLATE env var)
+   fallback_to_googletrans: true # Fallback option
+   batch_size: 10
+   retry_attempts: 3
+
+# Cloud Translation Control
+## By default, Cloud Translation is DISABLED to avoid API costs and log pollution.
+## To enable, set the environment variable:
+
+```bash
+export USE_CLOUD_TRANSLATE=true
+# Or on Windows (PowerShell):
+$env:USE_CLOUD_TRANSLATE="true"
+````
+
+If not set, or set to false, Google Cloud Translate will be skipped and only fallback/local translation will be used.
+
+See `.env.example` for a template.
 
 # Quality thresholds
+
 quality_thresholds:
-  min_segment_confidence: 0.5
-  min_translation_quality: 0.7
-  max_segment_length: 200
-```
+min_segment_confidence: 0.5
+min_translation_quality: 0.7
+max_segment_length: 200
+
+````
 
 ### Setup for Better Quality
 
@@ -103,7 +122,7 @@ quality_thresholds:
 
    ```bash
    export SARVAM_API_KEY="your-sarvam-api-key"
-   ```
+````
 
 2. **Install Google Cloud Translate** (recommended):
 
