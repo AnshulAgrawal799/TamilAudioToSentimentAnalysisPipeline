@@ -7,6 +7,7 @@ Runs the complete workflow: audio ingestion → transcription → analysis → a
 import argparse
 import logging
 import sys
+from pathlib import Path
 import os
 from pathlib import Path
 from typing import Dict, Any
@@ -101,7 +102,8 @@ def _annotate_product_intents(segments_data: list, product_intent_map: Dict[str,
         return
 
     # Build a case-insensitive map
-    ci_map = {str(k).strip().lower(): v for k, v in product_intent_map.items() if k is not None}
+    ci_map = {str(k).strip().lower(): v for k,
+              v in product_intent_map.items() if k is not None}
 
     for seg in segments_data:
         raw_products = seg.get('products')
@@ -120,20 +122,24 @@ def _annotate_product_intents(segments_data: list, product_intent_map: Dict[str,
 
 def main():
     """Main pipeline execution."""
-    parser = argparse.ArgumentParser(description='Tamil Audio to Sentiment Analysis Pipeline')
-    parser.add_argument('--config', default='config.yaml', help='Configuration file path')
-    parser.add_argument('--audio-dir', help='Override audio directory from config')
-    parser.add_argument('--output-dir', help='Override output directory from config')
-    parser.add_argument('--skip-audio-conversion', action='store_true', 
-                       help='Skip MP3 to WAV conversion (assume WAV files exist)')
-    parser.add_argument('--provider', choices=['sarvam', 'whisper'], 
-                       help='Override ASR provider from config')
-    
+    parser = argparse.ArgumentParser(
+        description='Tamil Audio to Sentiment Analysis Pipeline')
+    parser.add_argument('--config', default='config.yaml',
+                        help='Configuration file path')
+    parser.add_argument(
+        '--audio-dir', help='Override audio directory from config')
+    parser.add_argument(
+        '--output-dir', help='Override output directory from config')
+    parser.add_argument('--skip-audio-conversion', action='store_true',
+                        help='Skip MP3 to WAV conversion (assume WAV files exist)')
+    parser.add_argument('--provider', choices=['sarvam', 'whisper'],
+                        help='Override ASR provider from config')
+
     args = parser.parse_args()
-    
+
     # Load configuration
     config = load_config(args.config)
-    
+
     # Override config with command line args if provided
     if args.audio_dir:
         config['audio_dir'] = args.audio_dir
@@ -141,77 +147,85 @@ def main():
         config['output_dir'] = args.output_dir
     if args.provider:
         config['asr_provider'] = args.provider
-    
+
     logger.info("Starting Tamil Audio to Sentiment Analysis Pipeline")
     logger.info(f"Audio directory: {config['audio_dir']}")
     logger.info(f"Output directory: {config['output_dir']}")
     logger.info(f"ASR Provider: {config.get('asr_provider', 'sarvam')}")
-    
+
     # Log audio processing configuration
     audio_config = config.get('audio_processing', {})
     if audio_config:
         logger.info("Audio processing configuration:")
-        logger.info(f"  Convert MP3 to WAV: {audio_config.get('convert_mp3_to_wav', True)}")
-        logger.info(f"  Sample rate: {audio_config.get('wav_sample_rate', 16000)} Hz")
+        logger.info(
+            f"  Convert MP3 to WAV: {audio_config.get('convert_mp3_to_wav', True)}")
+        logger.info(
+            f"  Sample rate: {audio_config.get('wav_sample_rate', 16000)} Hz")
         logger.info(f"  Channels: {audio_config.get('wav_channels', 1)}")
         logger.info(f"  Workers: {audio_config.get('workers', 'auto')}")
-        logger.info(f"  Overwrite existing: {audio_config.get('overwrite_existing_wav', False)}")
-    
+        logger.info(
+            f"  Overwrite existing: {audio_config.get('overwrite_existing_wav', False)}")
+
     try:
         # Setup directories
         setup_directories(config)
-        
+
         # Step 1: Audio Ingestion (MP3 → WAV)
         if not args.skip_audio_conversion:
             logger.info("Step 1: Processing audio files...")
             ingester = AudioIngester(config)
             wav_files = ingester.process()
-            logger.info(f"Audio processing complete: {len(wav_files)} WAV files available")
+            logger.info(
+                f"Audio processing complete: {len(wav_files)} WAV files available")
         else:
             logger.info("Skipping audio conversion, using existing WAV files")
             wav_files = list(Path(config['temp_dir']).glob("*.wav"))
             logger.info(f"Found {len(wav_files)} existing WAV files")
-        
+
         if not wav_files:
             logger.error("No WAV files found for processing")
             sys.exit(1)
-        
+
         # Step 2: Transcription
         logger.info("Step 2: Transcribing audio files...")
         transcriber = UnifiedTranscriber(config)
-        
+
         # Use individual transcription for now since batch API endpoints are returning 404
         logger.info("Using individual transcription with Sarvam")
         transcript_results = []
         failed_files = []
-        
+
         for wav_file in wav_files:
             try:
                 result = transcriber.transcribe(wav_file)
                 transcript_results.append(result)
-                logger.info(f"Transcribed: {wav_file.name} ({result.provider}/{result.model_used})")
+                logger.info(
+                    f"Transcribed: {wav_file.name} ({result.provider}/{result.model_used})")
             except Exception as e:
                 logger.error(f"Failed to transcribe {wav_file}: {e}")
                 failed_files.append(wav_file.name)
                 continue
-        
+
         if failed_files:
-            logger.warning(f"Failed to transcribe {len(failed_files)} files: {failed_files}")
-            logger.info(f"Continuing with {len(transcript_results)} successfully transcribed files")
-        
+            logger.warning(
+                f"Failed to transcribe {len(failed_files)} files: {failed_files}")
+            logger.info(
+                f"Continuing with {len(transcript_results)} successfully transcribed files")
+
         if not transcript_results:
             logger.error("No transcriptions completed successfully")
             sys.exit(1)
-        
+
         # Step 3: NLU Analysis with utterance-level segmentation
-        logger.info("Step 3: Running NLU analysis with utterance-level segmentation...")
+        logger.info(
+            "Step 3: Running NLU analysis with utterance-level segmentation...")
         analyzer = NLUAnalyzer(config)
         analyzed_segments = []
         # Create a deterministic run id for this pipeline execution
         from datetime import datetime as _dt
         import uuid as _uuid
         pipeline_run_id = f"run-{_dt.now().strftime('%Y%m%d%H%M%S')}-{str(_uuid.uuid4())[:6]}"
-        
+
         for result in transcript_results:
             # Process each transcription result and create utterance-level segments
             segments = analyzer.analyze(result)
@@ -223,7 +237,7 @@ def main():
                     seg.source_model = getattr(result, 'model_used', None)
                 except Exception:
                     pass
-            
+
             # Add utterance indices and ensure proper timing
             # Normalize and align timings per audio
             # Sort by start_ms to compute monotonic, non-overlapping boundaries
@@ -250,38 +264,100 @@ def main():
                 last_end = segment.end_ms
                 # Flag placeholder timings
                 if segment.start_ms == 0 and segment.end_ms in (1, 1000):
-                    logger.warning(f"Segment {segment.segment_id} has placeholder timing - marking for human review")
+                    logger.warning(
+                        f"Segment {segment.segment_id} has placeholder timing - marking for human review")
                     segment.needs_human_review = True
-                    segment.asr_confidence = min(segment.asr_confidence or 0.5, 0.5)
+                    segment.asr_confidence = min(
+                        segment.asr_confidence or 0.5, 0.5)
                 # Generate proper ISO timestamp
                 try:
-                    base_time = dateparser.isoparse(result.metadata.get('recording_start', '2025-08-19T00:00:00Z'))
-                    segment_start_time = base_time + timedelta(milliseconds=segment.start_ms)
+                    base_time = dateparser.isoparse(result.metadata.get(
+                        'recording_start', '2025-08-19T00:00:00Z'))
+                    segment_start_time = base_time + \
+                        timedelta(milliseconds=segment.start_ms)
                     segment.timestamp = segment_start_time.isoformat().replace('+00:00', 'Z')
                 except Exception as e:
-                    logger.warning(f"Failed to generate timestamp for segment {segment.segment_id}: {e}")
+                    logger.warning(
+                        f"Failed to generate timestamp for segment {segment.segment_id}: {e}")
                     segment.needs_human_review = True
-            
+
             analyzed_segments.extend(segments)
-        
-        logger.info(f"Analyzed {len(analyzed_segments)} utterance-level segments")
-        
-        # Step 4: Generate outputs with new schema
-        logger.info("Step 4: Generating output files with updated schema...")
-        
+
+        logger.info(
+            f"Analyzed {len(analyzed_segments)} utterance-level segments")
+
+        # Step 4: Jingle Detection and Output Generation
+        logger.info(
+            "Step 4: Running jingle detection and generating output files...")
+
+        # --- Jingle Detection Integration ---
+        try:
+            from jingle_detection import detect_jingles
+            # Use 'jingle_audio' as the default reference folder
+            jingle_dir = config.get('jingle_reference_dir', str(
+                Path(__file__).parent.parent / 'jingle_audio'))
+            if not Path(jingle_dir).exists() or not any(Path(jingle_dir).glob('*.mp3')) and not any(Path(jingle_dir).glob('*.wav')):
+                logger.warning(
+                    f"Jingle reference folder not found or empty: {jingle_dir}. Skipping jingle detection.")
+                jingle_matches = []
+            else:
+                jingle_matches = detect_jingles(
+                    config['audio_dir'], jingle_dir)
+                logger.info(
+                    f"Jingle detection complete: {len(jingle_matches)} chunks processed.")
+        except Exception as e:
+            logger.error(f"Jingle detection failed: {e}")
+            jingle_matches = []
+
+        # Map chunk name to jingle detection result
+        # Map chunk name to jingle detection result
+        jingle_chunks = {jm['chunk']: jm for jm in jingle_matches}
+
+        # Annotate segments with jingle detection info (support multiple jingles)
+        for segment in analyzed_segments:
+            chunk_name = getattr(segment, 'audio_file_id', None)
+            segment_start = getattr(segment, 'start_ms', 0) / 1000.0
+            segment_end = getattr(segment, 'end_ms', 0) / 1000.0
+            if chunk_name and chunk_name in jingle_chunks:
+                jm = jingle_chunks[chunk_name]
+                occs = jm.get('jingle_occurrences', [])
+                if len(occs) > 0:
+                    print(
+                        f"[DEBUG] Chunk {chunk_name}: {len(occs)} jingle detections found.")
+                matching = [occ for occ in occs if not (
+                    occ['end_sec'] <= segment_start or occ['start_sec'] >= segment_end)]
+                if len(matching) > 0:
+                    print(
+                        f"[DEBUG] Segment {getattr(segment, 'utterance_index', '?')} ({segment_start:.2f}-{segment_end:.2f}s) matched {len(matching)} jingle(s): {[occ['jingle'] for occ in matching]}")
+                segment.jingle_detected = bool(matching)
+                segment.detected_jingles = list(
+                    set([occ['jingle'] for occ in matching]))
+                segment.jingle_scores = {
+                    occ['jingle']: occ['score'] for occ in matching}
+                segment.jingle_detections = matching
+            else:
+                segment.jingle_detected = False
+                segment.detected_jingles = []
+                segment.jingle_scores = {}
+                segment.jingle_detections = []
+
         # Sort segments by audio_file_id and utterance_index for proper ordering
-        analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.utterance_index))
-        
+        analyzed_segments.sort(key=lambda x: (
+            x.audio_file_id, x.utterance_index))
+
         # Write segments to JSON with new schema
         segments_output = Path(config['output_dir']) / "segments.json"
         with open(segments_output, 'w', encoding='utf-8') as f:
             import json
-            segments_data = [segment.to_dict() for segment in analyzed_segments]
+            segments_data = [segment.to_dict()
+                             for segment in analyzed_segments]
             # Deterministic post-processing: map products to product_intents
-            _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
+            _annotate_product_intents(
+                segments_data, config.get('PRODUCT_INTENT_MAP', {}))
             json.dump(segments_data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Wrote {len(segments_data)} utterance-level segments to: {segments_output}")
-        
+        logger.info(
+            f"Wrote {len(segments_data)} utterance-level segments to: {segments_output}")
+
         # Also write segments grouped by audio file for better organization
         audio_grouped_segments = {}
         for segment in analyzed_segments:
@@ -289,39 +365,44 @@ def main():
             if audio_id not in audio_grouped_segments:
                 audio_grouped_segments[audio_id] = []
             audio_grouped_segments[audio_id].append(segment.to_dict())
-        
+
         # Write audio-grouped segments
         for audio_id, segments in audio_grouped_segments.items():
-            audio_output = Path(config['output_dir']) / f"segments_{audio_id.replace('.wav', '')}.json"
+            audio_output = Path(config['output_dir']) / \
+                f"segments_{audio_id.replace('.wav', '')}.json"
             with open(audio_output, 'w', encoding='utf-8') as f:
                 # Apply the same deterministic post-processing per file
-                _annotate_product_intents(segments, config.get('PRODUCT_INTENT_MAP', {}))
+                _annotate_product_intents(
+                    segments, config.get('PRODUCT_INTENT_MAP', {}))
                 json.dump(segments, f, indent=2, ensure_ascii=False)
-            logger.info(f"Wrote {len(segments)} segments for {audio_id} to: {audio_output}")
-        
+            logger.info(
+                f"Wrote {len(segments)} segments for {audio_id} to: {audio_output}")
+
         # Generate aggregations
         aggregator = Aggregator(config)
-        
+
         # Stop-level aggregation
         stop_aggregates = aggregator.aggregate_by_stop(analyzed_segments)
         for stop_id, data in stop_aggregates.items():
-            output_file = Path(config['output_dir']) / f"aggregate_stop_{stop_id}_{data['date']}.json"
+            output_file = Path(config['output_dir']) / \
+                f"aggregate_stop_{stop_id}_{data['date']}.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 import json
                 json.dump(data, f, indent=2, ensure_ascii=False)
             logger.info(f"Wrote stop aggregate: {output_file}")
-        
+
         # Day-level aggregation
         day_aggregates = aggregator.aggregate_by_day(analyzed_segments)
         for seller_id, data in day_aggregates.items():
-            output_file = Path(config['output_dir']) / f"aggregate_day_{seller_id}_{data['date']}.json"
+            output_file = Path(config['output_dir']) / \
+                f"aggregate_day_{seller_id}_{data['date']}.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 import json
                 json.dump(data, f, indent=2, ensure_ascii=False)
             logger.info(f"Wrote day aggregate: {output_file}")
-        
+
         logger.info("Pipeline completed successfully!")
-        
+
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         sys.exit(1)
