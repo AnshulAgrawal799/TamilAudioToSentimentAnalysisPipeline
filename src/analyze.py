@@ -5,6 +5,7 @@ Improved version with better translation quality, standardized roles, and consis
 """
 
 import logging
+import os
 import random
 import uuid
 import re
@@ -16,10 +17,15 @@ from dateutil import parser as dateparser
 logger = logging.getLogger(__name__)
 
 # Import proper translation libraries (load both independently if available)
+
+# Cloud translation control via env var (default: disabled)
+USE_CLOUD_TRANSLATE = os.environ.get(
+    "USE_CLOUD_TRANSLATE", "false").lower() == "true"
 HAVE_CLOUD_TRANSLATE = False
 HAVE_GOOGLETRANS = False
 translate = None
 Translator = None
+
 
 try:
     from google.cloud import translate_v2 as translate  # type: ignore
@@ -117,6 +123,30 @@ class Segment:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization (canonicalized schema)."""
         needs_review = self._compute_needs_human_review()
+        # Build review reasons deterministically based on the same rules
+        review_reasons: List[str] = []
+        try:
+            if self.asr_confidence is not None and self.asr_confidence < 0.65:
+                review_reasons.append('asr_low_confidence')
+            if self.translation_confidence is not None and self.translation_confidence < 0.65:
+                review_reasons.append('translation_low_confidence')
+            # Any product extraction with low confidence
+            for product in getattr(self, 'products', []) or []:
+                if isinstance(product, dict) and product.get('product_confidence', 1.0) < 0.75:
+                    review_reasons.append('product_low_confidence')
+                    break
+            # High-risk negative cluster
+            if (
+                getattr(self, 'sentiment_label', 'neutral') == 'negative'
+                and getattr(self, 'churn_risk', 'low') == 'high'
+                and getattr(self, 'role_confidence', 0.0) >= 0.5
+            ):
+                review_reasons.append('high_risk_negative')
+        except Exception:
+            # If anything goes wrong, leave reasons as-is and let needs_review cover it
+            pass
+        # Persist reasons on the instance for downstream aggregators
+        self.review_reasons = review_reasons
         # Prepare translations dict
         translations = {}
         if hasattr(self, 'textEnglish') and self.textEnglish:
@@ -162,7 +192,12 @@ class Segment:
                 'score': self.sentiment_score,
                 'label': self.sentiment_label
             },
+            # Backward-compatible single label
             'emotion': self.emotion,
+            # New structured emotions distribution and model/taxonomy metadata
+            'emotions': self._build_emotion_distribution(),
+            'emotion_model_id': self.model_versions.get('emotion', 'emotion-heuristic-1.0'),
+            'emotion_taxonomy': 'v1.basic: [happy, disappointed, neutral]',
             'asr_confidence': self.asr_confidence,
             'model_versions': self.model_versions,
             'is_translated': is_translated,
@@ -183,41 +218,48 @@ class Segment:
     def _compute_needs_human_review(self) -> bool:
         """Derive whether this segment needs human review based on configured rules."""
         try:
-            # ASR confidence threshold (increased for better quality)
-            asr_low = (self.asr_confidence is not None) and (
-                self.asr_confidence < 0.85)
+            # Deterministic thresholds aligned with tests/spec
+            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.65)
+            translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.65)
 
-            # Translation confidence threshold (increased for better quality)
-            translation_low = (self.translation_confidence is not None) and (
-                self.translation_confidence < 0.80)
-
-            # Product confidence threshold (any product below threshold)
             product_low = False
-            for product in self.products:
+            for product in getattr(self, 'products', []) or []:
                 if isinstance(product, dict) and product.get('product_confidence', 1.0) < 0.75:
                     product_low = True
                     break
 
-            # High churn risk condition
-            churn_risk_condition = (
-                self.sentiment_score <= -0.25 and self.role_confidence >= 0.6)
-
-            # High negative sentiment with role confidence
-            negative_sentiment_condition = (
-                self.sentiment_score <= -0.25 and self.role_confidence >= 0.6)
+            high_risk_negative = (
+                getattr(self, 'sentiment_label', 'neutral') == 'negative'
+                and getattr(self, 'churn_risk', 'low') == 'high'
+                and getattr(self, 'role_confidence', 0.0) >= 0.5
+            )
 
             self.needs_human_review = bool(
-                asr_low or
-                translation_low or
-                product_low or
-                churn_risk_condition or
-                negative_sentiment_condition
+                asr_low or translation_low or product_low or high_risk_negative
             )
             return self.needs_human_review
 
         except Exception as e:
             logger.warning(f"Error computing human review flag: {e}")
             return True  # Default to human review on error
+
+    def _build_emotion_distribution(self) -> List[Dict[str, Any]]:
+        """Construct a simple probability-like distribution for emotions.
+
+        Uses the detected primary emotion label if present; assigns high weight to it
+        and distributes small residual to others for multi-label friendliness.
+        """
+        labels = ['happy', 'disappointed', 'neutral']
+        primary = (getattr(self, 'emotion', None) or 'neutral').lower()
+        if primary not in labels:
+            primary = 'neutral'
+        high = 0.9
+        residual = (1.0 - high) / (len(labels) - 1)
+        dist: List[Dict[str, Any]] = []
+        for lab in labels:
+            score = high if lab == primary else residual
+            dist.append({'label': lab, 'score': round(float(score), 3)})
+        return dist
 
     def to_json(self) -> str:
         """Serialize this segment to a JSON string."""
@@ -522,10 +564,11 @@ class NLUAnalyzer:
             return ""
 
         # Use Google Cloud Translate and googletrans if available
-        if HAVE_CLOUD_TRANSLATE or HAVE_GOOGLETRANS:
+
+        if (USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
             # Try Google Cloud Translate first (better quality)
             try:
-                if HAVE_CLOUD_TRANSLATE and translate is not None:
+                if USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE and translate is not None:
                     translate_client = translate.Client()
                     translation = translate_client.translate(
                         tamil_text, source_language='ta', target_language='en')
@@ -536,14 +579,17 @@ class NLUAnalyzer:
                         self._last_translation_confidence = 0.9
                         self._last_translation_source = 'google_cloud'
                         return self._post_process_translation(translation['translatedText'])
+                elif not USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE:
+                    logger.debug(
+                        "Cloud translation is available but disabled by USE_CLOUD_TRANSLATE env var.")
             except Exception as e:
                 msg = str(e)
                 # If Cloud Translation is disabled, stop retrying Cloud this run
                 if 'SERVICE_DISABLED' in msg or 'permission' in msg.lower() or '403' in msg:
-                    logger.warning(
+                    logger.debug(
                         f"Cloud translate failed: {e}. Skipping cloud for this run.")
                 else:
-                    logger.warning(
+                    logger.debug(
                         f"Cloud translate error: {e}. Will try googletrans.")
 
             # Always try googletrans next if available (even if cloud exists but returned empty)
