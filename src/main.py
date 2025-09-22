@@ -308,7 +308,25 @@ def main():
             output_file = Path(config['output_dir']) / f"aggregate_stop_{stop_id}_{data['date']}.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 import json
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                # Add file-level metadata envelope
+                from datetime import datetime as _dt
+                audio_sample_rate = config.get('audio_processing', {}).get('wav_sample_rate', 16000)
+                total_audio_ms = 0
+                try:
+                    for af in (data.get('audio_files') or {}).values():
+                        total_audio_ms += int(af.get('total_duration_ms', 0) or 0)
+                except Exception:
+                    total_audio_ms = 0
+                envelope = {
+                    'schema_version': '1.1.0',
+                    'pipeline_run_id': pipeline_run_id,
+                    'processed_at': _dt.utcnow().isoformat() + 'Z',
+                    'source_uri': str(Path(config['audio_dir']).resolve()),
+                    'audio_duration_ms': total_audio_ms,
+                    'audio_sample_rate': audio_sample_rate,
+                    'data': data,
+                }
+                json.dump(envelope, f, indent=2, ensure_ascii=False)
             logger.info(f"Wrote stop aggregate: {output_file}")
         
         # Day-level aggregation
@@ -317,7 +335,25 @@ def main():
             output_file = Path(config['output_dir']) / f"aggregate_day_{seller_id}_{data['date']}.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 import json
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                # Add file-level metadata envelope
+                from datetime import datetime as _dt
+                audio_sample_rate = config.get('audio_processing', {}).get('wav_sample_rate', 16000)
+                total_audio_ms = 0
+                try:
+                    for af in (data.get('audio_files') or {}).values():
+                        total_audio_ms += int(af.get('total_duration_ms', 0) or 0)
+                except Exception:
+                    total_audio_ms = 0
+                envelope = {
+                    'schema_version': '1.1.0',
+                    'pipeline_run_id': pipeline_run_id,
+                    'processed_at': _dt.utcnow().isoformat() + 'Z',
+                    'source_uri': str(Path(config['audio_dir']).resolve()),
+                    'audio_duration_ms': total_audio_ms,
+                    'audio_sample_rate': audio_sample_rate,
+                    'data': data,
+                }
+                json.dump(envelope, f, indent=2, ensure_ascii=False)
             logger.info(f"Wrote day aggregate: {output_file}")
         
         logger.info("Pipeline completed successfully!")

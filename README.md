@@ -342,6 +342,51 @@ These fields enable precise audio replay and debugging by providing deterministi
     - `asr_confidence < 0.65`
     - `translation_confidence < 0.65`
     - `sentiment_label == "negative"` AND `churn_risk == "high"` AND `role_confidence >= 0.5`
+  - When `needs_human_review` is true, `review_reasons` is populated with one or more of:
+    - `asr_low_confidence`
+    - `translation_low_confidence`
+    - `product_low_confidence`
+    - `high_risk_negative`
+
+**New Emotions Distribution (Multi-label friendly):**
+
+- Backward-compatible `emotion` (string) is preserved.
+- New structured fields:
+  - `emotions`: array of `{label, score}`, e.g. `[{"label":"neutral","score":0.9}]`
+  - `emotion_model_id`: e.g. `emotion-heuristic-1.0` (or from `model_versions.emotion` when available)
+  - `emotion_taxonomy`: e.g. `v1.basic: [happy, disappointed, neutral]`
+
+#### Updated Per-Segment Output (schema v1.1.0)
+
+```json
+{
+  "seller_id": "S123",
+  "stop_id": "STOP45",
+  "segment_id": "SEG001",
+  "audio_file_id": "tmp/Audio1.wav",
+  "timestamp": "2025-08-19T19:11:12Z",
+  "start_ms": 5220,
+  "end_ms": 7240,
+  "duration_ms": 2020,
+  "speaker_role": "buyer",
+  "textTamil": "தக்காளி எவ்வளவு விலை",
+  "textEnglish": "What is the price of tomatoes?",
+  "intent": "inquiry",
+  "sentiment_score": 0.2,
+  "sentiment_label": "positive",
+  "emotion": "neutral",
+  "emotions": [{"label":"neutral","score":0.9},{"label":"happy","score":0.05},{"label":"disappointed","score":0.05}],
+  "emotion_model_id": "emotion-heuristic-1.0",
+  "emotion_taxonomy": "v1.basic: [happy, disappointed, neutral]",
+  "confidence": 0.85,
+  "translation_confidence": 0.8,
+  "role_confidence": 0.6,
+  "churn_risk": "low",
+  "asr_confidence": 0.9,
+  "needs_human_review": false,
+  "review_reasons": []
+}
+```
 
 **Key Fixes Applied:**
 
@@ -350,44 +395,52 @@ These fields enable precise audio replay and debugging by providing deterministi
 - ✅ Enhanced intent classification with Tamil patterns
 - ✅ Proper speaker role enumeration: `["buyer", "seller", "other"]`
 
-### Aggregated Stop Output
+### Aggregated Stop Output (schema v1.1.0 envelope)
+
+As of schema v1.1.0, aggregate files are wrapped with file-level metadata. The actual aggregate payload is placed under `data` to maintain backward compatibility for consumers who only read the inner object.
+
+File-level metadata fields:
+
+- `schema_version` (string): e.g. "1.1.0"
+- `pipeline_run_id` (string): pipeline execution id
+- `processed_at` (ISO 8601 UTC): when the file was written
+- `source_uri` (string): resolved path/URI for input audio directory
+- `audio_duration_ms` (number): total duration across audio files included in this aggregate
+- `audio_sample_rate` (number): effective WAV sample rate used
+
+Example stop-level aggregate file:
 
 ```json
 {
-  "seller_id": "S123",
-  "stop_id": "STOP45",
-  "date": "2025-08-19",
-  "n_segments": 15,
-  "n_calls": 5,
-  "avg_sentiment_score": -0.01,
-  "sentiment_distribution": { "positive": 3, "neutral": 9, "negative": 3 },
-  "dominant_emotion": "neutral",
-  "top_intents": [
-    "other",
-    "purchase",
-    "bargain",
-    "inquiry",
-    "complaint",
-    "greeting"
-  ],
-  "intent_distribution": {
-    "other": 6,
-    "purchase": 3,
-    "bargain": 3,
-    "inquiry": 1,
-    "complaint": 1,
-    "greeting": 1
-  },
-  "sales_at_stop": { "tomato": 36, "onion": 15, "potato": 10 },
-  "inventory_after_sale": { "tomato": 22, "onion": 5, "potato": 8 },
-  "review_statistics": {
-    "total_segments": 15,
-    "needs_review": 3,
-    "review_percentage": 20.0,
-    "review_reasons": {
-      "asr_low_confidence": 1,
-      "translation_low_confidence": 1,
-      "high_risk_negative": 1
+  "schema_version": "1.1.0",
+  "pipeline_run_id": "run-20250819-abc123",
+  "processed_at": "2025-08-19T12:34:56Z",
+  "source_uri": "/abs/path/to/audio",
+  "audio_duration_ms": 123456,
+  "audio_sample_rate": 16000,
+  "data": {
+    "seller_id": "S123",
+    "stop_id": "STOP45",
+    "date": "2025-08-19",
+    "n_segments": 15,
+    "n_calls": 5,
+    "avg_sentiment_score": -0.01,
+    "sentiment_distribution": { "positive": 3, "neutral": 9, "negative": 3 },
+    "dominant_emotion": "neutral",
+    "top_intents": ["other","purchase","bargain","inquiry","complaint","greeting"],
+    "intent_distribution": {"other":6,"purchase":3,"bargain":3,"inquiry":1,"complaint":1,"greeting":1},
+    "audio_files": {"Audio1.wav":{"n_segments":10,"total_duration_ms":80000,"time_range":{"start_ms":0,"end_ms":82000}}},
+    "sales_at_stop": { "tomato": 36, "onion": 15, "potato": 10 },
+    "inventory_after_sale": { "tomato": 22, "onion": 5, "potato": 8 },
+    "review_statistics": {
+      "total_segments": 15,
+      "needs_review": 3,
+      "review_percentage": 20.0,
+      "review_reasons": {
+        "asr_low_confidence": 1,
+        "translation_low_confidence": 1,
+        "high_risk_negative": 1
+      }
     }
   }
 }
