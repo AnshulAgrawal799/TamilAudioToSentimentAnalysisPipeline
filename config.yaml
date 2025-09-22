@@ -5,30 +5,30 @@ temp_dir: "./data/tmp"
 
 # Audio processing (conversion controls)
 audio_processing:
-  convert_mp3_to_wav: true          # set false to skip conversion and feed MP3s directly to ASR
-  wav_sample_rate: 16000            # -ar 16000
-  wav_channels: 1                   # -ac 1 (mono)
-  out_dir: "./data/tmp"             # destination for converted WAVs (matches temp_dir)
-  delete_mp3_after_success: false   # set true to remove MP3s after successful conversion
-  workers: null                     # null = let code choose default (e.g. cpu_count//2)
-  overwrite_existing_wav: false     # set true to force reconversion even if WAV exists
+  convert_mp3_to_wav: true # set false to skip conversion and feed MP3s directly to ASR
+  wav_sample_rate: 16000 # -ar 16000
+  wav_channels: 1 # -ac 1 (mono)
+  out_dir: "./data/tmp" # destination for converted WAVs (matches temp_dir)
+  delete_mp3_after_success: false # set true to remove MP3s after successful conversion
+  workers: null # null = let code choose default (e.g. cpu_count//2)
+  overwrite_existing_wav: false # set true to force reconversion even if WAV exists
 
 # ASR settings
-asr_provider: "sarvam"              # "sarvam" or "whisper" (fallback)
-asr_model: "saarika:v2.5"           # Sarvam model for Tamil speech->text
-asr_language_code: "ta-IN"          # Tamil language code for Sarvam
-asr_batch_enabled: true             # Use batch API for longer files
-asr_batch_max_files_per_job: 20     # Max files per batch job
-asr_concurrency_limit: 3            # Max concurrent uploads/requests
+asr_provider: "sarvam" # "sarvam" or "whisper" (fallback)
+asr_model: "saarika:v2.5" # Sarvam model for Tamil speech->text
+asr_language_code: "ta-IN" # Tamil language code for Sarvam
+asr_batch_enabled: true # Use batch API for longer files
+asr_batch_max_files_per_job: 20 # Max files per batch job
+asr_concurrency_limit: 3 # Max concurrent uploads/requests
 asr_retry:
   max_attempts: 5
   backoff_factor: 2
-transcript_cache_enabled: true      # Cache transcripts to avoid re-transcribing
-transcript_cache_ttl_days: 30       # Cache TTL in days
+transcript_cache_enabled: true # Cache transcripts to avoid re-transcribing
+transcript_cache_ttl_days: 30 # Cache TTL in days
 
 # Whisper fallback settings (used when asr_provider="whisper")
-whisper_model: "medium"             # Fallback Whisper model (smaller than large-v3)
-language: "ta"                      # Tamil language for Whisper
+whisper_model: "medium" # Fallback Whisper model (smaller than large-v3)
+language: "ta" # Tamil language for Whisper
 
 # Map detected product names to product-intent tags
 PRODUCT_INTENT_MAP:
@@ -43,9 +43,19 @@ fields:
   textTamil: "Tamil text from transcription"
   textEnglish: "English translation text"
   speaker_roles: ["buyer", "seller", "customer_bystander", "other"]
-  intent_categories: ["complaint", "purchase_request", "purchase_positive", "purchase_negative", "product_praise", "request_resolution", "other"]
+  intent_categories:
+    [
+      "complaint",
+      "purchase_request",
+      "purchase_positive",
+      "purchase_negative",
+      "product_praise",
+      "request_resolution",
+      "other",
+    ]
   sentiment_labels: ["positive", "neutral", "negative"]
-  emotion_categories: ["happy", "satisfied", "neutral", "annoyed", "disappointed", "frustrated"]
+  emotion_categories:
+    ["happy", "satisfied", "neutral", "annoyed", "disappointed", "frustrated"]
   new_fields:
     - role_confidence
     - products
@@ -60,6 +70,19 @@ sentiment_thresholds:
   negative: -0.15
   neutral_range: [-0.15, 0.15]
   # Clear mapping: score >= 0.15 = positive, score <= -0.15 = negative, else neutral
+
+# Sentiment configuration (multilingual vs translation-weighted)
+sentiment:
+  # If true, compute sentiment directly from Tamil signals and ignore translation cues.
+  use_multilingual_direct: true
+  # Relative weight for English (translated) sentiment features when used.
+  # 1.0 = equal to Tamil features, 0.5 = half influence, 0.0 = ignore.
+  translation_weight: 0.5
+  # Minimum translation confidence to grant full translation_weight contribution.
+  # If a translation exists but confidence is below this, we use low_conf_translation_weight instead.
+  min_translation_conf: 0.75
+  # Weight for translation sentiment contribution when translation is low-confidence but present.
+  low_conf_translation_weight: 0.25
 
 # Placeholder values for missing metadata
 placeholders:
@@ -81,18 +104,18 @@ min_segment_words: 4
 
 # Translation settings
 translation:
-  use_google_cloud: true  # Use Google Cloud Translate API for better quality
+  use_google_cloud: true # Use Google Cloud Translate API for better quality
   fallback_to_googletrans: true
-  min_words_english: 4       # Flag translations shorter than this
+  min_words_english: 4 # Flag translations shorter than this
   low_confidence_penalty: 0.2
-  batch_size: 10  # Process translations in batches
-  retry_attempts: 3  # Number of retry attempts for failed translations
-  
+  batch_size: 10 # Process translations in batches
+  retry_attempts: 3 # Number of retry attempts for failed translations
+
 # Quality thresholds
 quality_thresholds:
-  min_segment_confidence: 0.5  # Minimum confidence for segments
-  min_translation_quality: 0.7  # Minimum quality for translations
-  max_segment_length: 200  # Maximum characters per segment
+  min_segment_confidence: 0.5 # Minimum confidence for segments
+  min_translation_quality: 0.7 # Minimum quality for translations
+  max_segment_length: 200 # Maximum characters per segment
 
 # Confidence weights for overall confidence calculation
 confidence_weights:
@@ -112,10 +135,10 @@ human_review_thresholds:
 
 # Utterance segmentation settings
 utterance_segmentation:
-  min_duration_ms: 500  # Minimum utterance duration
-  max_duration_ms: 30000  # Maximum utterance duration
-  pause_threshold_ms: 1000  # Pause threshold for splitting utterances
-  merge_short_utterances: true  # Merge very short back-to-back utterances
+  min_duration_ms: 500 # Minimum utterance duration
+  max_duration_ms: 30000 # Maximum utterance duration
+  pause_threshold_ms: 1000 # Pause threshold for splitting utterances
+  merge_short_utterances: true # Merge very short back-to-back utterances
 
 # Tamil/English filler words and stopwords for normalization
 text_normalization:

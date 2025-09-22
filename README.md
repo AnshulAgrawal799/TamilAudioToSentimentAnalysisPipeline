@@ -4,6 +4,13 @@ A minimal viable prototype pipeline that processes Tamil MP3 audio files and out
 
 **Recent Updates:** Fixed data schema inconsistencies, improved sentiment labeling, enhanced intent classification with Tamil patterns, **IMPROVED TRANSLATION QUALITY**, **✅ SARVAM SPEECH-TO-TEXT INTEGRATION COMPLETED**
 
+## Changelog (short)
+
+- 2025-09-22: Added `emotion_distribution` (six-label) to stop/day aggregates in `src/aggregate.py`. See README sections “Aggregated Stop Output” and “Day-level Aggregate.”
+- 2025-09-22: Added configurable multilingual sentiment weighting in `src/analyze.py` with `config.yaml -> sentiment` keys:
+  - `use_multilingual_direct` to bypass translation for sentiment when true.
+  - `translation_weight`, `min_translation_conf`, `low_conf_translation_weight` to control translation influence.
+
 ## Overview
 
 This pipeline:
@@ -427,6 +434,14 @@ Example stop-level aggregate file:
     "avg_sentiment_score": -0.01,
     "sentiment_distribution": { "positive": 3, "neutral": 9, "negative": 3 },
     "dominant_emotion": "neutral",
+    "emotion_distribution": {
+      "happy": 0.112,
+      "satisfied": 0.186,
+      "neutral": 0.503,
+      "annoyed": 0.061,
+      "disappointed": 0.081,
+      "frustrated": 0.057
+    },
     "top_intents": ["other","purchase","bargain","inquiry","complaint","greeting"],
     "intent_distribution": {"other":6,"purchase":3,"bargain":3,"inquiry":1,"complaint":1,"greeting":1},
     "audio_files": {"Audio1.wav":{"n_segments":10,"total_duration_ms":80000,"time_range":{"start_ms":0,"end_ms":82000}}},
@@ -456,6 +471,69 @@ Example stop-level aggregate file:
     - `asr_low_confidence`: Segments with ASR confidence < 0.65
     - `translation_low_confidence`: Segments with translation confidence < 0.65
     - `high_risk_negative`: High-risk negative segments (negative sentiment + high churn + role confidence ≥ 0.5)
+
+**New Emotion Distribution Field:**
+
+- `emotion_distribution`: Aggregated, six-label distribution averaged across segments. Labels default to `[happy, satisfied, neutral, annoyed, disappointed, frustrated]` and align with `config.yaml -> fields.emotion_categories`.
+- Values are normalized to sum to 1.0 and rounded to 0.001.
+- `dominant_emotion` remains for quick top-emotion reading; use `emotion_distribution` for charts and analytics.
+
+### Day-level Aggregate
+
+The day-level output includes the same `emotion_distribution` field, e.g.:
+
+```json
+{
+  "seller_id": "S123",
+  "date": "2025-08-19",
+  "total_segments": 42,
+  "avg_sentiment_score": 0.03,
+  "sentiment_distribution": {"positive": 18, "neutral": 19, "negative": 5},
+  "dominant_emotion": "satisfied",
+  "emotion_distribution": {
+    "happy": 0.265,
+    "satisfied": 0.344,
+    "neutral": 0.289,
+    "annoyed": 0.028,
+    "disappointed": 0.042,
+    "frustrated": 0.032
+  }
+}
+```
+
+## Multilingual Sentiment Configuration
+
+You can control how sentiment is computed using `config.yaml -> sentiment`:
+
+```yaml
+sentiment:
+  # If true, compute sentiment directly from Tamil signals and ignore translation cues.
+  use_multilingual_direct: false
+  # Relative weight for English (translated) sentiment features when used.
+  # 1.0 = equal to Tamil features, 0.5 = half influence, 0.0 = ignore.
+  translation_weight: 0.5
+  # Minimum translation confidence to grant full translation_weight contribution.
+  min_translation_conf: 0.75
+  # Weight when translation is low-confidence but present.
+  low_conf_translation_weight: 0.25
+```
+
+Recommended runs to compare modes:
+
+```bash
+# Baseline: translation helps but is down-weighted
+python src/main.py --config config.yaml
+
+# Multilingual-direct (bypass translation for sentiment)
+# Edit config.yaml and set:
+# sentiment.use_multilingual_direct: true
+python src/main.py --config config.yaml
+
+# After each run, check:
+# - data/outputs/segments.json
+# - data/outputs/aggregate_stop_<STOP>_<DATE>.json
+# - data/outputs/aggregate_day_<SELLER>_<DATE>.json
+```
 
 ## Enhanced NLU Analysis
 
