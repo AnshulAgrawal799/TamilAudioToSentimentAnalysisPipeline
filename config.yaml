@@ -85,7 +85,6 @@ translation:
   fallback_to_googletrans: true
   min_words_english: 4       # Flag translations shorter than this
   low_confidence_penalty: 0.2
-  fallback_to_googletrans: true  # Fallback to googletrans if Google Cloud unavailable
   batch_size: 10  # Process translations in batches
   retry_attempts: 3  # Number of retry attempts for failed translations
   
