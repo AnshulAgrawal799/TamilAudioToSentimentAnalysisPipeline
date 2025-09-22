@@ -18,9 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Import proper translation libraries (load both independently if available)
 
-# Cloud translation control via env var (default: disabled)
-USE_CLOUD_TRANSLATE = os.environ.get(
-    "USE_CLOUD_TRANSLATE", "false").lower() == "true"
+# Cloud translation availability flags (actual usage will be driven by config in NLUAnalyzer)
+USE_CLOUD_TRANSLATE = False  # default, will be overridden per-instance from config
 HAVE_CLOUD_TRANSLATE = False
 HAVE_GOOGLETRANS = False
 translate = None
@@ -119,6 +118,8 @@ class Segment:
         # Provenance
         self.source_provider = kwargs.get('source_provider')
         self.source_model = kwargs.get('source_model')
+        # config reference for thresholding
+        self.config = kwargs.get('config', {})
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization (canonicalized schema)."""
@@ -126,9 +127,20 @@ class Segment:
         # Build review reasons deterministically based on the same rules
         review_reasons: List[str] = []
         try:
-            if self.asr_confidence is not None and self.asr_confidence < 0.65:
+            # Use thresholds from config if present (fall back to sensible defaults)
+            cfg = getattr(self, 'config', {}) or {}
+            hr = (cfg.get('human_review_thresholds') or {}) if isinstance(cfg, dict) else {}
+            asr_thr = float(hr.get('asr_confidence', 0.65))
+            trn_thr = float(hr.get('translation_confidence', 0.75))
+
+            if self.asr_confidence is not None and self.asr_confidence < asr_thr:
                 review_reasons.append('asr_low_confidence')
-            if self.translation_confidence is not None and self.translation_confidence < 0.65:
+            # Only consider translation confidence when a translation exists and was accepted
+            if (
+                getattr(self, 'is_translated', False)
+                and self.translation_confidence is not None
+                and self.translation_confidence < trn_thr
+            ):
                 review_reasons.append('translation_low_confidence')
             # Any product extraction with low confidence
             for product in getattr(self, 'products', []) or []:
@@ -196,8 +208,8 @@ class Segment:
             'emotion': self.emotion,
             # New structured emotions distribution and model/taxonomy metadata
             'emotions': self._build_emotion_distribution(),
-            'emotion_model_id': self.model_versions.get('emotion', 'emotion-heuristic-1.0'),
-            'emotion_taxonomy': 'v1.basic: [happy, disappointed, neutral]',
+            'emotion_model_id': self.model_versions.get('emotion', 'emotion-heuristic-1.1'),
+            'emotion_taxonomy': 'v1.enhanced: [happy, satisfied, neutral, annoyed, disappointed, frustrated]',
             'asr_confidence': self.asr_confidence,
             'model_versions': self.model_versions,
             'is_translated': is_translated,
@@ -208,9 +220,19 @@ class Segment:
     def _compute_needs_human_review(self) -> bool:
         """Derive whether this segment needs human review based on configured rules."""
         try:
-            # Deterministic thresholds aligned with tests/spec
-            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.65)
-            translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.65)
+            # Deterministic thresholds aligned with tests/spec and config
+            cfg = getattr(self, 'config', {}) or {}
+            hr = (cfg.get('human_review_thresholds') or {}) if isinstance(cfg, dict) else {}
+            asr_thr = float(hr.get('asr_confidence', 0.65))
+            trn_thr = float(hr.get('translation_confidence', 0.75))
+
+            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < asr_thr)
+            # Only apply translation_low if a valid translation was produced
+            translation_low = (
+                getattr(self, 'is_translated', False)
+                and (self.translation_confidence is not None)
+                and (self.translation_confidence < trn_thr)
+            )
 
             product_low = False
             for product in getattr(self, 'products', []) or []:
@@ -332,6 +354,10 @@ class NLUAnalyzer:
         # Translation confidence tracking
         self._last_translation_confidence = 0.8  # Default confidence
         self._last_translation_source = 'none'
+
+        # Config-driven translation provider selection
+        tcfg = (config.get('translation') or {}) if isinstance(config, dict) else {}
+        self.use_cloud_translate = bool(tcfg.get('use_google_cloud', False))
 
         # Initialize heuristics
         self._init_heuristics()
@@ -555,10 +581,10 @@ class NLUAnalyzer:
 
         # Use Google Cloud Translate and googletrans if available
 
-        if (USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
+        if (self.use_cloud_translate and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
             # Try Google Cloud Translate first (better quality)
             try:
-                if USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE and translate is not None:
+                if self.use_cloud_translate and HAVE_CLOUD_TRANSLATE and translate is not None:
                     translate_client = translate.Client()
                     translation = translate_client.translate(
                         tamil_text, source_language='ta', target_language='en')
@@ -569,7 +595,7 @@ class NLUAnalyzer:
                         self._last_translation_confidence = 0.9
                         self._last_translation_source = 'google_cloud'
                         return self._post_process_translation(translation['translatedText'])
-                elif not USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE:
+                elif not self.use_cloud_translate and HAVE_CLOUD_TRANSLATE:
                     logger.debug(
                         "Cloud translation is available but disabled by USE_CLOUD_TRANSLATE env var.")
             except Exception as e:
@@ -900,7 +926,7 @@ class NLUAnalyzer:
                 stop_id=stop_id,
                 segment_id=f"SEG{str(uuid.uuid4())[:8]}",
                 audio_file_id=audio_file_id,
-                timestamp=timestamp,
+                merged_block_id=None,
                 start_ms=start_ms,
                 end_ms=end_ms,
                 duration_ms=duration_ms,
@@ -910,7 +936,9 @@ class NLUAnalyzer:
                 translation_confidence=translation_confidence,
                 translation_source=self._last_translation_source,
                 asr_confidence=segment.get('confidence', 0.8),
-                audio_type=audio_type
+                audio_type=audio_type,
+                # Attach config for review thresholds and other behaviors
+                config=self.config
             )
 
             # Use speaker information from Sarvam if available, otherwise analyze

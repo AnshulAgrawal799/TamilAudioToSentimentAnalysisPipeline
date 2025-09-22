@@ -31,7 +31,8 @@ class Aggregator:
                 audio_files[audio_file_id] = {
                     'n_segments': 0,
                     'total_duration_ms': 0,
-                    'time_range': {'start_ms': float('inf'), 'end_ms': 0}
+                    'time_range': {'start_ms': float('inf'), 'end_ms': 0},
+                    'timeline_duration_ms': 0
                 }
             
             audio_files[audio_file_id]['n_segments'] += 1
@@ -49,6 +50,13 @@ class Aggregator:
         for audio_file in audio_files.values():
             if audio_file['time_range']['start_ms'] == float('inf'):
                 audio_file['time_range']['start_ms'] = 0
+            # Compute timeline-based duration (end - start)
+            try:
+                start_ms = int(audio_file['time_range']['start_ms'] or 0)
+                end_ms = int(audio_file['time_range']['end_ms'] or 0)
+                audio_file['timeline_duration_ms'] = max(0, end_ms - start_ms)
+            except Exception:
+                audio_file['timeline_duration_ms'] = 0
         
         return audio_files
 
@@ -271,6 +279,11 @@ class Aggregator:
             'high_risk_negative': 0
         }
         
+        # Thresholds from config if available
+        hr = (self.config.get('human_review_thresholds') or {}) if isinstance(self.config, dict) else {}
+        asr_thr = float(hr.get('asr_confidence', 0.65))
+        trn_thr = float(hr.get('translation_confidence', 0.75))
+
         for segment in segments:
             # Check if segment needs review
             segment_dict = segment.to_dict()
@@ -281,10 +294,11 @@ class Aggregator:
                 asr_conf = getattr(segment, 'asr_confidence', 1.0)
                 trans_conf = getattr(segment, 'translation_confidence', 1.0)
                 
-                if asr_conf is not None and asr_conf < 0.65:
+                if asr_conf is not None and asr_conf < asr_thr:
                     review_reasons['asr_low_confidence'] += 1
                 
-                if trans_conf is not None and trans_conf < 0.65:
+                # Only count translation low when a translation exists
+                if getattr(segment, 'is_translated', False) and trans_conf is not None and trans_conf < trn_thr:
                     review_reasons['translation_low_confidence'] += 1
                 
                 if (getattr(segment, 'sentiment_label', 'neutral') == 'negative' and
