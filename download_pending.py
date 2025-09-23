@@ -46,7 +46,7 @@ def download_file(url, record_id):
     filename = os.path.basename(parsed.path) or "download.audio"
     filename = _sanitize_filename(filename)
 
-    script_folder = _script_dir()
+    script_folder = os.path.join(_script_dir(), "audio")
     os.makedirs(script_folder, exist_ok=True)
 
     dest_path = _unique_path(script_folder, filename)
