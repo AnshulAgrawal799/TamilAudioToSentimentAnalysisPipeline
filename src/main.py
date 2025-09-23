@@ -242,6 +242,17 @@ def main():
             # Normalize and align timings per audio
             # Sort by start_ms to compute monotonic, non-overlapping boundaries
             segments.sort(key=lambda s: (s.start_ms, s.end_ms))
+            # Determine true audio duration in milliseconds for clamping
+            audio_duration_ms = None
+            try:
+                import wave as _wave_len
+                with _wave_len.open(str(result.audio_file), 'rb') as _wf_len:
+                    _frames = _wf_len.getnframes()
+                    _rate = _wf_len.getframerate()
+                    audio_duration_ms = int((_frames / float(_rate)) * 1000.0)
+            except Exception:
+                audio_duration_ms = None
+
             last_end = 0
             min_gap_ms = 20
             for i, segment in enumerate(segments):
@@ -259,6 +270,13 @@ def main():
                     segment.start_ms = last_end + min_gap_ms
                 if segment.end_ms <= segment.start_ms:
                     segment.end_ms = segment.start_ms + max(200, min_gap_ms)
+                # Clamp to audio duration if known
+                if audio_duration_ms is not None:
+                    if segment.end_ms > audio_duration_ms:
+                        segment.end_ms = audio_duration_ms
+                    if segment.start_ms >= audio_duration_ms:
+                        # Move start just before end to keep minimal positive duration
+                        segment.start_ms = max(0, audio_duration_ms - max(200, min_gap_ms))
                 # Update duration
                 segment.duration_ms = segment.end_ms - segment.start_ms
                 last_end = segment.end_ms

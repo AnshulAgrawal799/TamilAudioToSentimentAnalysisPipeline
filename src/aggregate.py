@@ -31,7 +31,8 @@ class Aggregator:
                 audio_files[audio_file_id] = {
                     'n_segments': 0,
                     'total_duration_ms': 0,
-                    'time_range': {'start_ms': float('inf'), 'end_ms': 0}
+                    'time_range': {'start_ms': float('inf'), 'end_ms': 0},
+                    'timeline_duration_ms': 0
                 }
             
             audio_files[audio_file_id]['n_segments'] += 1
@@ -49,6 +50,13 @@ class Aggregator:
         for audio_file in audio_files.values():
             if audio_file['time_range']['start_ms'] == float('inf'):
                 audio_file['time_range']['start_ms'] = 0
+            # Compute timeline-based duration (end - start)
+            try:
+                start_ms = int(audio_file['time_range']['start_ms'] or 0)
+                end_ms = int(audio_file['time_range']['end_ms'] or 0)
+                audio_file['timeline_duration_ms'] = max(0, end_ms - start_ms)
+            except Exception:
+                audio_file['timeline_duration_ms'] = 0
         
         return audio_files
 
@@ -77,6 +85,7 @@ class Aggregator:
             avg_sentiment = self._calculate_avg_sentiment(stop_segments)
             sentiment_dist = self._calculate_sentiment_distribution(stop_segments)
             dominant_emotion = self._calculate_dominant_emotion(stop_segments)
+            emotion_dist = self._calculate_emotion_distribution(stop_segments)
             top_intents = self._calculate_top_intents(stop_segments)
             audio_file_stats = self._calculate_audio_file_stats(stop_segments)
             review_stats = self._calculate_review_statistics(stop_segments)
@@ -95,6 +104,7 @@ class Aggregator:
                 'avg_sentiment_score': avg_sentiment,
                 'sentiment_distribution': sentiment_dist,
                 'dominant_emotion': dominant_emotion,
+                'emotion_distribution': emotion_dist,
                 'top_intents': top_intents,
                 'audio_files': audio_file_stats,
                 'sales_at_stop': sales_data,
@@ -132,6 +142,7 @@ class Aggregator:
             avg_sentiment = self._calculate_avg_sentiment(day_segments)
             sentiment_dist = self._calculate_sentiment_distribution(day_segments)
             dominant_emotion = self._calculate_dominant_emotion(day_segments)
+            emotion_dist = self._calculate_emotion_distribution(day_segments)
             intent_dist = self._calculate_intent_distribution(day_segments)
             audio_file_stats = self._calculate_audio_file_stats(day_segments)
             review_stats = self._calculate_review_statistics(day_segments)
@@ -150,6 +161,7 @@ class Aggregator:
                 'avg_sentiment_score': avg_sentiment,
                 'sentiment_distribution': sentiment_dist,
                 'dominant_emotion': dominant_emotion,
+                'emotion_distribution': emotion_dist,
                 'intent_distribution': intent_dist,
                 'audio_files': audio_file_stats,
                 'total_sales': total_sales,
@@ -226,6 +238,60 @@ class Aggregator:
         # Return most common emotion, default to neutral
         most_common = counter.most_common(1)
         return most_common[0][0] if most_common else 'neutral'
+
+    def _calculate_emotion_distribution(self, segments: List) -> Dict[str, float]:
+        """Aggregate six-label emotion distributions across segments.
+
+        Uses each segment's structured `emotions` distribution when available (via
+        `Segment._build_emotion_distribution()` or `Segment.to_dict()`), then averages
+        scores per label and normalizes to sum to 1.0. Returns scores rounded to 3 decimals.
+        """
+        # Default taxonomy
+        default_labels = ['happy', 'satisfied', 'neutral', 'annoyed', 'disappointed', 'frustrated']
+        if not segments:
+            return {lab: 0.0 for lab in default_labels}
+
+        # Prefer taxonomy from config if present
+        labels = default_labels
+        try:
+            fields = (self.config.get('fields') or {}) if isinstance(self.config, dict) else {}
+            cfg_labels = fields.get('emotion_categories')
+            if isinstance(cfg_labels, list) and all(isinstance(x, str) for x in cfg_labels):
+                labels = cfg_labels
+        except Exception:
+            pass
+
+        sums = {lab: 0.0 for lab in labels}
+        count = 0
+        for seg in segments:
+            try:
+                # Try to use the segment's distribution builder directly
+                if hasattr(seg, '_build_emotion_distribution') and callable(getattr(seg, '_build_emotion_distribution')):
+                    dist_list = seg._build_emotion_distribution()  # returns list of {label, score}
+                else:
+                    # Fallback through serialization path
+                    sd = seg.to_dict()
+                    dist_list = sd.get('emotions', [])
+                if not dist_list:
+                    continue
+                # Accumulate
+                for item in dist_list:
+                    lab = str(item.get('label', '')).lower()
+                    score = float(item.get('score', 0.0) or 0.0)
+                    if lab in sums:
+                        sums[lab] += score
+                count += 1
+            except Exception:
+                continue
+
+        if count == 0:
+            return {lab: 0.0 for lab in labels}
+
+        # Average and normalize
+        avgs = {lab: (sums[lab] / count) for lab in labels}
+        total = sum(avgs.values()) or 1.0
+        normalized = {lab: round(avgs[lab] / total, 3) for lab in labels}
+        return normalized
     
     def _calculate_top_intents(self, segments: List) -> List[str]:
         """Calculate top intents."""
@@ -271,6 +337,11 @@ class Aggregator:
             'high_risk_negative': 0
         }
         
+        # Thresholds from config if available
+        hr = (self.config.get('human_review_thresholds') or {}) if isinstance(self.config, dict) else {}
+        asr_thr = float(hr.get('asr_confidence', 0.65))
+        trn_thr = float(hr.get('translation_confidence', 0.75))
+
         for segment in segments:
             # Check if segment needs review
             segment_dict = segment.to_dict()
@@ -281,10 +352,11 @@ class Aggregator:
                 asr_conf = getattr(segment, 'asr_confidence', 1.0)
                 trans_conf = getattr(segment, 'translation_confidence', 1.0)
                 
-                if asr_conf is not None and asr_conf < 0.65:
+                if asr_conf is not None and asr_conf < asr_thr:
                     review_reasons['asr_low_confidence'] += 1
                 
-                if trans_conf is not None and trans_conf < 0.65:
+                # Only count translation low when a translation exists
+                if getattr(segment, 'is_translated', False) and trans_conf is not None and trans_conf < trn_thr:
                     review_reasons['translation_low_confidence'] += 1
                 
                 if (getattr(segment, 'sentiment_label', 'neutral') == 'negative' and

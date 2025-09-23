@@ -18,9 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Import proper translation libraries (load both independently if available)
 
-# Cloud translation control via env var (default: disabled)
-USE_CLOUD_TRANSLATE = os.environ.get(
-    "USE_CLOUD_TRANSLATE", "false").lower() == "true"
+# Cloud translation availability flags (actual usage will be driven by config in NLUAnalyzer)
+USE_CLOUD_TRANSLATE = False  # default, will be overridden per-instance from config
 HAVE_CLOUD_TRANSLATE = False
 HAVE_GOOGLETRANS = False
 translate = None
@@ -119,6 +118,8 @@ class Segment:
         # Provenance
         self.source_provider = kwargs.get('source_provider')
         self.source_model = kwargs.get('source_model')
+        # config reference for thresholding
+        self.config = kwargs.get('config', {})
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization (canonicalized schema)."""
@@ -126,9 +127,20 @@ class Segment:
         # Build review reasons deterministically based on the same rules
         review_reasons: List[str] = []
         try:
-            if self.asr_confidence is not None and self.asr_confidence < 0.65:
+            # Use thresholds from config if present (fall back to sensible defaults)
+            cfg = getattr(self, 'config', {}) or {}
+            hr = (cfg.get('human_review_thresholds') or {}) if isinstance(cfg, dict) else {}
+            asr_thr = float(hr.get('asr_confidence', 0.65))
+            trn_thr = float(hr.get('translation_confidence', 0.75))
+
+            if self.asr_confidence is not None and self.asr_confidence < asr_thr:
                 review_reasons.append('asr_low_confidence')
-            if self.translation_confidence is not None and self.translation_confidence < 0.65:
+            # Only consider translation confidence when a translation exists and was accepted
+            if (
+                getattr(self, 'is_translated', False)
+                and self.translation_confidence is not None
+                and self.translation_confidence < trn_thr
+            ):
                 review_reasons.append('translation_low_confidence')
             # Any product extraction with low confidence
             for product in getattr(self, 'products', []) or []:
@@ -196,8 +208,8 @@ class Segment:
             'emotion': self.emotion,
             # New structured emotions distribution and model/taxonomy metadata
             'emotions': self._build_emotion_distribution(),
-            'emotion_model_id': self.model_versions.get('emotion', 'emotion-heuristic-1.0'),
-            'emotion_taxonomy': 'v1.basic: [happy, disappointed, neutral]',
+            'emotion_model_id': self.model_versions.get('emotion', 'emotion-heuristic-1.1'),
+            'emotion_taxonomy': 'v1.enhanced: [happy, satisfied, neutral, annoyed, disappointed, frustrated]',
             'asr_confidence': self.asr_confidence,
             'model_versions': self.model_versions,
             'is_translated': is_translated,
@@ -218,9 +230,19 @@ class Segment:
     def _compute_needs_human_review(self) -> bool:
         """Derive whether this segment needs human review based on configured rules."""
         try:
-            # Deterministic thresholds aligned with tests/spec
-            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < 0.65)
-            translation_low = (self.translation_confidence is not None) and (self.translation_confidence < 0.65)
+            # Deterministic thresholds aligned with tests/spec and config
+            cfg = getattr(self, 'config', {}) or {}
+            hr = (cfg.get('human_review_thresholds') or {}) if isinstance(cfg, dict) else {}
+            asr_thr = float(hr.get('asr_confidence', 0.65))
+            trn_thr = float(hr.get('translation_confidence', 0.75))
+
+            asr_low = (self.asr_confidence is not None) and (self.asr_confidence < asr_thr)
+            # Only apply translation_low if a valid translation was produced
+            translation_low = (
+                getattr(self, 'is_translated', False)
+                and (self.translation_confidence is not None)
+                and (self.translation_confidence < trn_thr)
+            )
 
             product_low = False
             for product in getattr(self, 'products', []) or []:
@@ -244,21 +266,74 @@ class Segment:
             return True  # Default to human review on error
 
     def _build_emotion_distribution(self) -> List[Dict[str, Any]]:
-        """Construct a simple probability-like distribution for emotions.
+        """Construct a probability-like distribution for an enhanced emotion set.
 
-        Uses the detected primary emotion label if present; assigns high weight to it
-        and distributes small residual to others for multi-label friendliness.
+        Enhanced taxonomy: [happy, satisfied, neutral, annoyed, disappointed, frustrated]
+
+        Strategy:
+        - Use detected primary `emotion` as an anchor with a higher weight.
+        - Shape the remaining mass using `sentiment_label` to bias towards
+          positive or negative clusters.
+        - Keep outputs deterministic and sum to 1.0.
         """
-        labels = ['happy', 'disappointed', 'neutral']
+        labels = ['happy', 'satisfied', 'neutral', 'annoyed', 'disappointed', 'frustrated']
         primary = (getattr(self, 'emotion', None) or 'neutral').lower()
         if primary not in labels:
             primary = 'neutral'
-        high = 0.9
-        residual = (1.0 - high) / (len(labels) - 1)
+
+        sentiment_label = getattr(self, 'sentiment_label', 'neutral') or 'neutral'
+
+        # Anchor weight for primary emotion
+        anchor = 0.6
+
+        # Remaining mass is shaped by sentiment clusters
+        remaining = 1.0 - anchor
+
+        # Cluster priors based on sentiment label
+        if sentiment_label == 'positive':
+            priors = {
+                'happy': 0.50,
+                'satisfied': 0.35,
+                'neutral': 0.10,
+                'annoyed': 0.02,
+                'disappointed': 0.02,
+                'frustrated': 0.01,
+            }
+        elif sentiment_label == 'negative':
+            priors = {
+                'happy': 0.01,
+                'satisfied': 0.04,
+                'neutral': 0.10,
+                'annoyed': 0.20,
+                'disappointed': 0.35,
+                'frustrated': 0.30,
+            }
+        else:  # neutral sentiment
+            priors = {
+                'happy': 0.10,
+                'satisfied': 0.20,
+                'neutral': 0.40,
+                'annoyed': 0.10,
+                'disappointed': 0.10,
+                'frustrated': 0.10,
+            }
+
+        # Normalize priors defensively
+        total_prior = sum(priors.values()) or 1.0
+        priors = {k: v / total_prior for k, v in priors.items()}
+
+        # Build distribution: anchor for primary + remaining mass spread by priors
+        raw = {}
+        for lab in labels:
+            base = remaining * priors.get(lab, 0.0)
+            raw[lab] = base
+        raw[primary] = raw.get(primary, 0.0) + anchor
+
+        # Final normalization and rounding
+        s = sum(raw.values()) or 1.0
         dist: List[Dict[str, Any]] = []
         for lab in labels:
-            score = high if lab == primary else residual
-            dist.append({'label': lab, 'score': round(float(score), 3)})
+            dist.append({'label': lab, 'score': round(float(raw[lab] / s), 3)})
         return dist
 
     def to_json(self) -> str:
@@ -343,6 +418,21 @@ class NLUAnalyzer:
         self._last_translation_confidence = 0.8  # Default confidence
         self._last_translation_source = 'none'
 
+        # Config-driven translation provider selection
+        tcfg = (config.get('translation') or {}) if isinstance(config, dict) else {}
+        self.use_cloud_translate = bool(tcfg.get('use_google_cloud', False))
+
+        # Sentiment configuration: multilingual vs translation-weighted
+        scfg = (config.get('sentiment') or {}) if isinstance(config, dict) else {}
+        # If True, sentiment relies directly on Tamil features and ignores translation
+        self.use_multilingual_direct = bool(scfg.get('use_multilingual_direct', False))
+        # Relative weight of English (translated) features when considered
+        self.translation_sentiment_weight = float(scfg.get('translation_weight', 1.0))
+        # Minimum translation confidence to use the full translation weight
+        self.min_translation_conf_for_sentiment = float(scfg.get('min_translation_conf', 0.75))
+        # Weight to use when translation is low-confidence but present
+        self.low_conf_translation_weight = float(scfg.get('low_conf_translation_weight', 0.25))
+
         # Initialize heuristics
         self._init_heuristics()
 
@@ -373,7 +463,7 @@ class NLUAnalyzer:
             # Tamil patterns for buyer (Unicode)
             'வாங்குவோம்', 'வாங்குகிறேன்', 'கொடுங்கள்', 'எவ்வளவு', 'விலை என்ன',
             'உள்ளதா', 'தேவை', 'விரும்புகிறேன்', 'எடுத்துக்கொள்கிறேன்', 'வாங்க',
-            'கொடுங்க', 'வாங்குபவர்', 'வாடிக்கையாளர்', 'வாங்குதல்', 'ஆர்டர்',
+            'கொடுங்க', 'வாடிக்கையாளர்', 'வாங்குபவர்', 'வாங்குதல்', 'ஆர்டர்',
             'வாங்காமல', 'வாங்க மாட்டோம்', 'நம்பி', 'என்ன பண்ணுறது', 'பிரச்சினை',
             'நீங்கள் வருகிறீங்க', 'நாங்க என்ன பண்ணுறது', 'நம்பி நாங்க'
         ]
@@ -565,10 +655,10 @@ class NLUAnalyzer:
 
         # Use Google Cloud Translate and googletrans if available
 
-        if (USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
+        if (self.use_cloud_translate and HAVE_CLOUD_TRANSLATE) or HAVE_GOOGLETRANS:
             # Try Google Cloud Translate first (better quality)
             try:
-                if USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE and translate is not None:
+                if self.use_cloud_translate and HAVE_CLOUD_TRANSLATE and translate is not None:
                     translate_client = translate.Client()
                     translation = translate_client.translate(
                         tamil_text, source_language='ta', target_language='en')
@@ -579,7 +669,7 @@ class NLUAnalyzer:
                         self._last_translation_confidence = 0.9
                         self._last_translation_source = 'google_cloud'
                         return self._post_process_translation(translation['translatedText'])
-                elif not USE_CLOUD_TRANSLATE and HAVE_CLOUD_TRANSLATE:
+                elif not self.use_cloud_translate and HAVE_CLOUD_TRANSLATE:
                     logger.debug(
                         "Cloud translation is available but disabled by USE_CLOUD_TRANSLATE env var.")
             except Exception as e:
@@ -910,7 +1000,7 @@ class NLUAnalyzer:
                 stop_id=stop_id,
                 segment_id=f"SEG{str(uuid.uuid4())[:8]}",
                 audio_file_id=audio_file_id,
-                timestamp=timestamp,
+                merged_block_id=None,
                 start_ms=start_ms,
                 end_ms=end_ms,
                 duration_ms=duration_ms,
@@ -920,7 +1010,9 @@ class NLUAnalyzer:
                 translation_confidence=translation_confidence,
                 translation_source=self._last_translation_source,
                 asr_confidence=segment.get('confidence', 0.8),
-                audio_type=audio_type
+                audio_type=audio_type,
+                # Attach config for review thresholds and other behaviors
+                config=self.config
             )
 
             # Use speaker information from Sarvam if available, otherwise analyze
@@ -1147,45 +1239,51 @@ class NLUAnalyzer:
             'நன்று', 'சிறந்த', 'அருமை', 'மகிழ்ச்சி', 'திருப்தி', 'நல்ல', 'சந்தோஷம்'
         ]
         negative_words = [
-            'bad', 'poor', 'terrible', 'unhappy', 'dissatisfied', 'upset', 'angry',
-            'மோசம்', 'மோசமான', 'வருத்தம்', 'திருப்தியற்ற', 'கோபம்', 'எரிச்சல்'
+            'bad', 'poor', 'terrible', 'unhappy', 'dissatisfied', 'angry', 'issue', 'problem',
+            'மோசம்', 'மோசமான', 'வருத்தம்', 'திருப்தியற்ற', 'கோபம்', 'பிரச்சினை', 'தவறு'
         ]
 
-        # Count positive and negative words in both languages
-        positive_count = sum(
-            1 for word in positive_words if word in text_lower)
-        negative_count = sum(
-            1 for word in negative_words if word in text_lower)
+        # Contextual modifiers (intensifiers/attenuators)
+        intensifiers = ['very', 'so', 'too', 'really', 'மிகவும்', 'ரொம்ப', 'அதிகம்']
+        attenuators = ['slightly', 'somewhat', 'கொஞ்சம்', 'சிறிது']
 
-        if english_lower:
-            positive_count += sum(1 for word in positive_words if word in english_lower)
-            negative_count += sum(1 for word in negative_words if word in english_lower)
+        # Count matches in Tamil and English separately
+        tamil_pos = sum(1 for w in positive_words if w in text_lower)
+        tamil_neg = sum(1 for w in negative_words if w in text_lower)
+        eng_pos = sum(1 for w in positive_words if w in english_lower)
+        eng_neg = sum(1 for w in negative_words if w in english_lower)
 
-        # Context-based sentiment adjustment
-        context_multiplier = 1.0
+        # Apply context modifiers
+        has_intensifier = any(i in text_lower or i in english_lower for i in intensifiers)
+        has_attenuator = any(a in text_lower or a in english_lower for a in attenuators)
+        if has_intensifier:
+            tamil_pos *= 1.2
+            tamil_neg *= 1.2
+            eng_pos *= 1.2
+            eng_neg *= 1.2
+        if has_attenuator:
+            tamil_pos *= 0.9
+            tamil_neg *= 0.9
+            eng_pos *= 0.9
+            eng_neg *= 0.9
 
-        # Check for complaint context (negative sentiment)
-        if segment.intent == 'complaint' or segment.intent == 'purchase_negative':
-            context_multiplier = 2.0  # Stronger negative bias for complaints
-        # Check for product praise context (positive sentiment)
-        elif segment.intent == 'product_praise':
-            context_multiplier = 1.5  # Stronger positive bias for praise
-
-        # Calculate sentiment score with context
-        if positive_count > negative_count:
-            score = min(0.9, (0.3 + (positive_count * 0.15))
-                        * context_multiplier)
-        elif negative_count > positive_count:
-            score = max(-0.9, (-0.3 - (negative_count * 0.15))
-                        * context_multiplier)
+        # Determine weight for translation contribution
+        if self.use_multilingual_direct:
+            english_weight = 0.0
         else:
-            # For neutral cases, apply context bias
-            if segment.intent == 'complaint' or segment.intent == 'purchase_negative':
-                score = random.uniform(-0.3, -0.1)  # Bias toward negative
-            elif segment.intent == 'product_praise':
-                score = random.uniform(0.1, 0.3)   # Bias toward positive
+            # Only use translation if present
+            is_translated = bool(getattr(segment, 'is_translated', False))
+            tr_conf = float(getattr(segment, 'translation_confidence', 0.0) or 0.0)
+            if is_translated:
+                english_weight = self.translation_sentiment_weight if tr_conf >= self.min_translation_conf_for_sentiment else self.low_conf_translation_weight
             else:
-                score = random.uniform(-0.1, 0.1)  # Truly neutral
+                english_weight = 0.0
+
+        # Base scaling factor such that +/-1 keyword roughly moves score by ~0.2
+        scale = 0.2
+        base_contrib = (tamil_pos - tamil_neg) * scale
+        trans_contrib = (eng_pos - eng_neg) * scale * english_weight
+        score = base_contrib + trans_contrib
 
         segment.sentiment_score = round(score, 2)
 
