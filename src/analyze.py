@@ -192,7 +192,7 @@ class Segment:
                     'confidence': p.get('confidence', p.get('product_confidence', 0.0))
                 })
 
-        return {
+        d = {
             'segment_id': self.segment_id,
             'audio_file_id': self.audio_file_id,
             'start_ms': self.start_ms,
@@ -226,6 +226,16 @@ class Segment:
             'needs_human_review': needs_review,
             'review_reasons': getattr(self, 'review_reasons', []),
         }
+        # Add jingle detection fields if present
+        if hasattr(self, 'jingle_detected'):
+            d['jingle_detected'] = self.jingle_detected
+        if hasattr(self, 'detected_jingles'):
+            d['detected_jingles'] = self.detected_jingles
+        if hasattr(self, 'jingle_scores'):
+            d['jingle_scores'] = self.jingle_scores
+        if hasattr(self, 'jingle_detections'):
+            d['jingle_detections'] = self.jingle_detections
+        return d
 
     def _compute_needs_human_review(self) -> bool:
         """Derive whether this segment needs human review based on configured rules."""
