@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Main pipeline script for Tamil audio to sentiment analysis.
 Runs the complete workflow: audio ingestion → transcription → analysis → aggregation.
@@ -302,8 +302,11 @@ def main():
         
         logger.info(f"Analyzed {len(analyzed_segments)} utterance-level segments")
         
-        # Step 4: Persist segments to database (no local JSON writes)
-        logger.info("Step 4: Persisting segments to database...")
+        # Step 4: Persist segments
+        persist_to_db = bool(config.get('persist_segments_to_db', True))
+        logger.info(
+            "Step 4: Persisting segments to %s..." % ("database" if persist_to_db else "local JSON file")
+        )
 
         # Sort segments by audio_file_id and utterance_index for proper ordering
         analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.utterance_index))
@@ -312,31 +315,49 @@ def main():
         segments_data = [segment.to_dict() for segment in analyzed_segments]
         _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
 
-        # Insert into DB using a single connection
-        conn = None
-        inserted = 0
-        try:
-            conn = db_get_connection()
-            for seg in segments_data:
-                # Validate audio_file_id presence and type (FK constraint)
-                afid = seg.get('audio_file_id')
-                try:
-                    _ = int(afid)
-                except Exception:
-                    logger.warning(f"Skipping segment_id={seg.get('segment_id')} due to invalid audio_file_id={afid}")
-                    continue
-                try:
-                    db_insert_segment(seg, conn=conn)
-                    inserted += 1
-                except Exception as e:
-                    logger.error(f"Failed to insert segment_id={seg.get('segment_id')} audio_file_id={seg.get('audio_file_id')}: {e}")
-            logger.info(f"Inserted {inserted}/{len(segments_data)} segments into DB")
-        finally:
+        if persist_to_db:
+            # Insert into DB using a single connection
+            conn = None
+            inserted = 0
             try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
+                conn = db_get_connection()
+                for seg in segments_data:
+                    # Validate audio_file_id presence and type (FK constraint)
+                    afid = seg.get('audio_file_id')
+                    try:
+                        _ = int(afid)
+                    except Exception:
+                        logger.warning(f"Skipping segment_id={seg.get('segment_id')} due to invalid audio_file_id={afid}")
+                        continue
+                    try:
+                        db_insert_segment(seg, conn=conn)
+                        inserted += 1
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to insert segment_id={seg.get('segment_id')} audio_file_id={seg.get('audio_file_id')}: {e}"
+                        )
+                logger.info(f"Inserted {inserted}/{len(segments_data)} segments into DB")
+            finally:
+                try:
+                    if conn is not None:
+                        conn.close()
+                except Exception:
+                    pass
+        else:
+            # Write segments to a local JSON file
+            output_file = Path(config['output_dir']) / f"segments_{pipeline_run_id}.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                import json
+                from datetime import datetime as _dt
+                envelope = {
+                    'schema_version': '1.1.0',
+                    'pipeline_run_id': pipeline_run_id,
+                    'processed_at': _dt.utcnow().isoformat() + 'Z',
+                    'source_uri': str(Path(config['audio_dir']).resolve()),
+                    'data': segments_data,
+                }
+                json.dump(envelope, f, indent=2, ensure_ascii=False)
+            logger.info(f"Wrote segments JSON: {output_file}")
         
         # Generate aggregations
         aggregator = Aggregator(config)

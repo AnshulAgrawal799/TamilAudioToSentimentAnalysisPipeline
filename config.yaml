@@ -30,6 +30,11 @@ transcript_cache_ttl_days: 30 # Cache TTL in days
 whisper_model: "medium" # Fallback Whisper model (smaller than large-v3)
 language: "ta" # Tamil language for Whisper
 
+# Persistence settings
+# If true (default), segments are written to the MySQL `segment` table.
+# If false, segments are written to a local JSON file under `output_dir`.
+persist_segments_to_db: false
+
 # Map detected product names to product-intent tags
 PRODUCT_INTENT_MAP:
   tomato: product_praise
