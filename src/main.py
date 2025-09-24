@@ -28,6 +28,15 @@ from ingest_audio import AudioIngester
 from transcriber_factory import UnifiedTranscriber
 from analyze import NLUAnalyzer
 from aggregate import Aggregator
+# Ensure project root is on sys.path to import db_mysql when running this file directly
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from db_mysql import (
+    get_connection as db_get_connection,
+    insert_segment as db_insert_segment,
+    get_audio_file_id_by_filename as db_get_audio_file_id_by_filename,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -188,6 +197,15 @@ def main():
         for wav_file in wav_files:
             try:
                 result = transcriber.transcribe(wav_file)
+                # Resolve DB audio_file.id from filename and attach to metadata for downstream use
+                try:
+                    resolved_id = db_get_audio_file_id_by_filename(wav_file.name)
+                    if resolved_id is not None:
+                        if not isinstance(result.metadata, dict):
+                            result.metadata = {}
+                        result.metadata['audio_file_id'] = int(resolved_id)
+                except Exception as _e:
+                    logger.warning(f"Could not resolve audio_file_id for {wav_file.name}: {_e}")
                 transcript_results.append(result)
                 logger.info(f"Transcribed: {wav_file.name} ({result.provider}/{result.model_used})")
             except Exception as e:
@@ -284,38 +302,41 @@ def main():
         
         logger.info(f"Analyzed {len(analyzed_segments)} utterance-level segments")
         
-        # Step 4: Generate outputs with new schema
-        logger.info("Step 4: Generating output files with updated schema...")
-        
+        # Step 4: Persist segments to database (no local JSON writes)
+        logger.info("Step 4: Persisting segments to database...")
+
         # Sort segments by audio_file_id and utterance_index for proper ordering
         analyzed_segments.sort(key=lambda x: (x.audio_file_id, x.utterance_index))
-        
-        # Write segments to JSON with new schema
-        segments_output = Path(config['output_dir']) / "segments.json"
-        with open(segments_output, 'w', encoding='utf-8') as f:
-            import json
-            segments_data = [segment.to_dict() for segment in analyzed_segments]
-            # Deterministic post-processing: map products to product_intents
-            _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
-            json.dump(segments_data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Wrote {len(segments_data)} utterance-level segments to: {segments_output}")
-        
-        # Also write segments grouped by audio file for better organization
-        audio_grouped_segments = {}
-        for segment in analyzed_segments:
-            audio_id = segment.audio_file_id
-            if audio_id not in audio_grouped_segments:
-                audio_grouped_segments[audio_id] = []
-            audio_grouped_segments[audio_id].append(segment.to_dict())
-        
-        # Write audio-grouped segments
-        for audio_id, segments in audio_grouped_segments.items():
-            audio_output = Path(config['output_dir']) / f"segments_{audio_id.replace('.wav', '')}.json"
-            with open(audio_output, 'w', encoding='utf-8') as f:
-                # Apply the same deterministic post-processing per file
-                _annotate_product_intents(segments, config.get('PRODUCT_INTENT_MAP', {}))
-                json.dump(segments, f, indent=2, ensure_ascii=False)
-            logger.info(f"Wrote {len(segments)} segments for {audio_id} to: {audio_output}")
+
+        # Prepare segment dicts and annotate product intents deterministically
+        segments_data = [segment.to_dict() for segment in analyzed_segments]
+        _annotate_product_intents(segments_data, config.get('PRODUCT_INTENT_MAP', {}))
+
+        # Insert into DB using a single connection
+        conn = None
+        inserted = 0
+        try:
+            conn = db_get_connection()
+            for seg in segments_data:
+                # Validate audio_file_id presence and type (FK constraint)
+                afid = seg.get('audio_file_id')
+                try:
+                    _ = int(afid)
+                except Exception:
+                    logger.warning(f"Skipping segment_id={seg.get('segment_id')} due to invalid audio_file_id={afid}")
+                    continue
+                try:
+                    db_insert_segment(seg, conn=conn)
+                    inserted += 1
+                except Exception as e:
+                    logger.error(f"Failed to insert segment_id={seg.get('segment_id')} audio_file_id={seg.get('audio_file_id')}: {e}")
+            logger.info(f"Inserted {inserted}/{len(segments_data)} segments into DB")
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
         
         # Generate aggregations
         aggregator = Aggregator(config)

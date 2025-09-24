@@ -5,6 +5,7 @@ Improved version with better translation quality, standardized roles, and consis
 """
 
 import logging
+import sys
 import os
 import random
 import uuid
@@ -13,6 +14,15 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 from dateutil import parser as dateparser
+
+# Ensure project root on sys.path to import db_mysql when this module is imported directly
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from db_mysql import get_audio_file_id_by_filename as _get_audio_file_id_by_filename
+except Exception:
+    _get_audio_file_id_by_filename = None  # Will handle gracefully at call site
 
 logger = logging.getLogger(__name__)
 
@@ -880,9 +890,38 @@ class NLUAnalyzer:
         anchor_time = metadata.get('recording_start', self.placeholders.get(
             'anchor_time', '1970-01-01T00:00:00Z'))
 
-        # Get audio file information
-        audio_file_id = str(
-            transcription_result.audio_file.name) if transcription_result.audio_file else 'UNKNOWN_AUDIO'
+        # Get audio file information: prefer metadata-provided DB id, fall back to resolver by filename
+        audio_file_id = None
+        try:
+            meta_id = None
+            try:
+                meta_id = (transcription_result.metadata or {}).get('audio_file_id') if hasattr(transcription_result, 'metadata') else None
+            except Exception:
+                meta_id = None
+            if meta_id is not None:
+                try:
+                    audio_file_id = int(meta_id)
+                    logger.debug(f"Using audio_file_id from metadata: {audio_file_id}")
+                except Exception:
+                    audio_file_id = None
+            # If still not available, attempt to resolve from filename
+            if audio_file_id is None:
+                audio_basename = transcription_result.audio_file.name if transcription_result.audio_file else None
+                if _get_audio_file_id_by_filename and audio_basename:
+                    resolved = _get_audio_file_id_by_filename(audio_basename)
+                    if resolved is not None:
+                        audio_file_id = int(resolved)
+                        logger.debug(f"Resolved audio_file_id={audio_file_id} from filename '{audio_basename}'")
+                    else:
+                        # Help debug filename matching issues
+                        stem = Path(audio_basename).stem if audio_basename else None
+                        logger.warning(
+                            f"Could not resolve audio_file_id for filename='{audio_basename}'. "
+                            f"Tried candidates: ['{audio_basename}', '{stem}.mp3', '{stem}.wav' and URL-encoded variants]."
+                        )
+        except Exception as e:
+            logger.warning(f"Failed to resolve audio_file_id from metadata/filename due to error: {e}")
+            audio_file_id = None
 
         # Process each transcription segment
         for i, segment in enumerate(transcription_result.get_segments()):
