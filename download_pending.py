@@ -45,6 +45,9 @@ def download_file(url, record_id):
     # get the basename (drop any query parameters)
     filename = os.path.basename(parsed.path) or "download.audio"
     filename = _sanitize_filename(filename)
+    # Prefix with DB record id for stable downstream mapping (e.g., "15_filename.mp3")
+    if not str(filename).startswith(f"{record_id}_"):
+        filename = f"{record_id}_" + filename
 
     script_folder = os.path.join(_script_dir(), "audio")
     os.makedirs(script_folder, exist_ok=True)
