@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Main pipeline script for Tamil audio to sentiment analysis.
 Runs the complete workflow: audio ingestion → transcription → analysis → aggregation.
